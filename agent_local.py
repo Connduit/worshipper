@@ -142,7 +142,8 @@ def run_goal(client: OpenAI, messages: list, goal: str) -> None:
         for attempt in range(1, 4):   # local servers sometimes fail to parse a model's output
             try:
                 resp = client.chat.completions.create(
-                    model=MODEL, messages=messages, tools=TOOLS, temperature=0.2
+                    model=MODEL, messages=messages, tools=TOOLS,
+                    temperature=(0.2, 0.7, 1.0)[attempt - 1],   # vary the sample on retries
                 )
                 break
             except (APIStatusError, APIConnectionError) as e:
