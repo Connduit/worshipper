@@ -6,10 +6,10 @@ One file, two roles
 HOST role (what YOU run):
     python agent_local.py [--new] [--chat] ["goal"]
   * Commands from the model run inside a bwrap jail: read-only system, no network,
-    only ~/agent-workspace writable (as /workspace).
+    only <repo>/workspace writable (as /workspace).
   * A unix-socket bridge (socat) exposes ONLY your llama-server to the jail, so the
     model can verify code by making real LLM calls without getting internet access.
-  * On first run this file copies itself to ~/agent-workspace/agent_dev.py. The model
+  * On first run this file copies itself to <repo>/workspace/agent_dev.py. The model
     edits THAT copy, never the file that builds the jail.
 
 DEV role (what the MODEL runs, inside the jail, to test its edits):
@@ -18,7 +18,7 @@ DEV role (what the MODEL runs, inside the jail, to test its edits):
 
 Review and promote the model's work yourself:
     python agent_local.py --diff                      # show diff host vs dev copy
-    cp ~/agent-workspace/agent_dev.py agent_local.py  # only after reading the diff
+    cp workspace/agent_dev.py agent_local.py  # only after reading the diff
     python agent_local.py --sync                      # reset dev copy from host file
 
 One-time setup (Arch):
@@ -49,7 +49,8 @@ LLM_URL = os.environ.get("LLM_URL", f"http://127.0.0.1:{LLAMA_PORT}/v1")
 MODEL = os.environ.get("LLM_MODEL", "local")   # llama-server mostly ignores this
 SANDBOX_MODE = os.environ.get("SANDBOX_MODE", "bwrap")   # "bwrap" | "docker" | "none"
 CONTAINER = os.environ.get("SANDBOX", "agent-sandbox")   # docker mode only
-WORKSPACE = os.path.expanduser(os.environ.get("WORKSPACE", "~/agent-workspace"))
+WORKSPACE = os.path.abspath(os.path.expanduser(os.environ.get(
+    "WORKSPACE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace"))))
 EXPOSE_LLAMA = os.environ.get("EXPOSE_LLAMA", "1") == "1"
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "25"))
 LOG_FILE = os.environ.get("LOG_FILE", "agent_run.jsonl")
