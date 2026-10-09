@@ -1,0 +1,10 @@
+[Unit]
+Description=llama-server (gpt-oss-20b)
+
+[Service]
+ExecStart=/home/binks/repos/llama.cpp/build/bin/llama-server -hf ggml-org/gpt-oss-20b-GGUF --jinja -ngl 99 -c 32768 -np 1 --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
