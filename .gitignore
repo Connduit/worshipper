@@ -1,0 +1,6 @@
+workspace/*
+!workspace/.gitkeep
+session.json
+agent_run.jsonl
+.venv/
+__pycache__/

@@ -1,0 +1,14 @@
+jail() {
+  bwrap --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/bin /sbin \
+    --symlink usr/lib /lib --symlink usr/lib /lib64 --ro-bind /etc /etc \
+    --proc /proc --dev /dev --tmpfs /tmp \
+    --bind /home/binks/repos/worshipper/workspace /workspace \
+    --chdir /workspace --setenv HOME /workspace \
+    --unshare-all --die-with-parent --new-session bash -c "$1"
+}
+
+jail 'ls /home'                   # empty or missing: your home is hidden
+jail 'ls /workspace'              # shows only what's in your workspace folder
+jail 'touch /usr/x'               # fails: read-only
+jail 'echo hi > /workspace/t.txt' # works
+ls /home/binks/repos/worshipper/workspace/t.txt
