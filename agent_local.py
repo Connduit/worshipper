@@ -1,48 +1,100 @@
 """
-Local-LLM agent with a Docker sandbox.
+Local-LLM agent sandboxed with bubblewrap, talking to a llama.cpp server.
 
-  Arch laptop (this script)  --HTTP-->  Windows PC (Ollama + GPU)
-  Commands run in a throwaway Docker container, never on your host.
+One file, two roles
+-------------------
+HOST role (what YOU run):
+    python agent_local.py [--new] [--chat] ["goal"]
+  * Commands from the model run inside a bwrap jail: read-only system, no network,
+    only ~/agent-workspace writable (as /workspace).
+  * A unix-socket bridge (socat) exposes ONLY your llama-server to the jail, so the
+    model can verify code by making real LLM calls without getting internet access.
+  * On first run this file copies itself to ~/agent-workspace/agent_dev.py. The model
+    edits THAT copy, never the file that builds the jail.
 
-One-time setup
---------------
-Windows PC (the LLM host):
-    1. Install Ollama, then:  ollama pull qwen2.5-coder:14b      (or any tool-capable model)
-    2. Make it reachable on your LAN:  setx OLLAMA_HOST "0.0.0.0:11434"  (restart Ollama)
-       Only allow it on your private network in the firewall.
+DEV role (what the MODEL runs, inside the jail, to test its edits):
+    SANDBOX_MODE=none python /workspace/agent_dev.py ...
+  * "none" = already inside the jail, so run commands directly (no nested bwrap).
 
-Sandbox (default: bubblewrap, no Docker needed):
-    sudo pacman -S bubblewrap python-openai      # or: pip install openai
-    # Commands run inside a bwrap jail: read-only system, no network, no access to
-    # your home dir or Windows drives. Only ~/agent-workspace is writable (as /workspace).
-    # Set SANDBOX_MODE=docker later to use a container instead (see DOCKER settings below).
+Review and promote the model's work yourself:
+    python agent_local.py --diff                      # show diff host vs dev copy
+    cp ~/agent-workspace/agent_dev.py agent_local.py  # only after reading the diff
+    python agent_local.py --sync                      # reset dev copy from host file
 
-Run (inside WSL, where llama-server is running):
-    LLM_URL=http://localhost:8080/v1 LLM_MODEL=gpt-oss-20b \
-        python agent_local.py "Make a file hello.txt containing the current date, then print it"
+One-time setup (Arch):
+    sudo pacman -S bubblewrap socat python-openai
+    llama-server -m model.gguf --jinja -c 16384 -np 2 --port 8080
+      (--jinja is needed for tool calling; -np 2 lets the outer agent and the model's
+       inner test run share the server without queueing.)
+
+Env vars: LLM_URL, LLM_MODEL, LLAMA_PORT, WORKSPACE, SANDBOX_MODE (bwrap|docker|none),
+          EXPOSE_LLAMA (1|0), MAX_STEPS, SESSION_FILE, LOG_FILE
 """
+import atexit
+import difflib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime
 
 from openai import APIConnectionError, APIStatusError, OpenAI
 
-LLM_URL = os.environ.get("LLM_URL", "http://localhost:11434/v1")
-MODEL = os.environ.get("LLM_MODEL", "qwen2.5-coder:14b")
-SANDBOX_MODE = os.environ.get("SANDBOX_MODE", "bwrap")   # "bwrap" or "docker"
-CONTAINER = os.environ.get("SANDBOX", "agent-sandbox")    # only used in docker mode
+# --------------------------------------------------------------------------- config
+LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "8080"))
+LLM_URL = os.environ.get("LLM_URL", f"http://127.0.0.1:{LLAMA_PORT}/v1")
+MODEL = os.environ.get("LLM_MODEL", "local")   # llama-server mostly ignores this
+SANDBOX_MODE = os.environ.get("SANDBOX_MODE", "bwrap")   # "bwrap" | "docker" | "none"
+CONTAINER = os.environ.get("SANDBOX", "agent-sandbox")   # docker mode only
 WORKSPACE = os.path.expanduser(os.environ.get("WORKSPACE", "~/agent-workspace"))
-os.makedirs(WORKSPACE, exist_ok=True)
-MAX_STEPS = 25
-LOG_FILE = "agent_run.jsonl"   # every step is logged for evaluation (Phase 7)
+EXPOSE_LLAMA = os.environ.get("EXPOSE_LLAMA", "1") == "1"
+MAX_STEPS = int(os.environ.get("MAX_STEPS", "25"))
+LOG_FILE = os.environ.get("LOG_FILE", "agent_run.jsonl")
+SESSION_FILE = os.environ.get("SESSION_FILE", "session.json")   # kept outside the sandbox
+DEFAULT_TIMEOUT = 30
+MAX_TIMEOUT = 300
 
-SYSTEM = """You are an autonomous agent working toward a goal inside a Linux sandbox.
+DEV_NAME = "agent_dev.py"
+HOST_FILE = os.path.abspath(__file__)
+DEV_COPY = os.path.join(WORKSPACE, DEV_NAME)
+
+os.makedirs(WORKSPACE, exist_ok=True)
+
+# Set by start_llama_bridge(); read by sandbox_cmd().
+SOCK_DIR: str | None = None
+
+# --------------------------------------------------------------------------- prompts
+def build_system() -> str:
+    s = """You are an autonomous agent working toward a goal inside a Linux sandbox.
 Work step by step. Each turn, call exactly ONE tool, read the result, then decide
 the next step. If a command fails, read the error and try something different.
 When the goal is achieved (or impossible), call `finish` with a summary.
-Never reply with plain text only; always call a tool."""
+Never reply with plain text only; always call a tool.
+Your working directory is /workspace. Prefer small targeted edits (sed -i, or a short
+python patch script) over rewriting whole files."""
+    if SANDBOX_MODE == "bwrap" and EXPOSE_LLAMA:
+        s += f"""
+
+A llama.cpp server (OpenAI-compatible, base URL http://127.0.0.1:{LLAMA_PORT}/v1) is
+reachable from your commands. There is NO other network access.
+
+If asked to improve the agent script, edit /workspace/{DEV_NAME} (never anything else),
+and verify every change before calling finish:
+  1. python -m py_compile /workspace/{DEV_NAME}
+  2. A real end-to-end run (pass a larger timeout, it makes LLM calls):
+     run_shell with timeout=120 and command:
+       cd /workspace && SANDBOX_MODE=none LLM_URL=http://127.0.0.1:{LLAMA_PORT}/v1 \\
+       SESSION_FILE=/tmp/s.json LOG_FILE=/tmp/l.jsonl WORKSPACE=/workspace MAX_STEPS=6 \\
+       python {DEV_NAME} --new "run: echo hello, then finish"
+     It passes if the output shows [DONE] and no Traceback.
+Report what you changed and what the test showed."""
+    return s
+
+
+SYSTEM = build_system()
 
 TOOLS = [
     {"type": "function", "function": {
@@ -50,9 +102,11 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "run_shell",
-        "description": "Run a bash command inside the sandbox container (30s timeout).",
+        "description": ("Run a bash command inside the sandbox. Default timeout 30s; "
+                        f"set `timeout` (seconds, max {MAX_TIMEOUT}) for slow commands."),
         "parameters": {"type": "object",
-                       "properties": {"command": {"type": "string"}},
+                       "properties": {"command": {"type": "string"},
+                                      "timeout": {"type": "integer"}},
                        "required": ["command"]}}},
     {"type": "function", "function": {
         "name": "finish", "description": "Call when the goal is complete.",
@@ -62,16 +116,50 @@ TOOLS = [
 ]
 
 
+# --------------------------------------------------------------------------- sandbox
 def truncate(s: str, n: int = 3000) -> str:
     return s if len(s) <= n else s[:n] + f"\n...[truncated {len(s) - n} chars]"
 
 
+def start_llama_bridge() -> None:
+    """Host side: forward a private unix socket to the llama.cpp TCP port."""
+    global SOCK_DIR
+    if shutil.which("socat") is None:
+        sys.exit("socat not found on the host. Install it: sudo pacman -S socat")
+    SOCK_DIR = tempfile.mkdtemp(prefix="agent-sock-")      # mkdtemp is mode 0700
+    sock = os.path.join(SOCK_DIR, "llama.sock")
+    p = subprocess.Popen(
+        ["socat", f"UNIX-LISTEN:{sock},fork,mode=600", f"TCP:127.0.0.1:{LLAMA_PORT}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    atexit.register(p.terminate)
+    atexit.register(shutil.rmtree, SOCK_DIR, True)
+    for _ in range(20):                                    # wait up to ~2s for the socket
+        if os.path.exists(sock):
+            return
+        time.sleep(0.1)
+    print("[warn] llama bridge socket did not appear; the sandbox won't reach llama-server")
+
+
 def sandbox_cmd(command: str) -> list[str]:
     """Build the argv that runs `command` inside the sandbox."""
+    if SANDBOX_MODE == "none":          # we're already inside the jail (dev/test role)
+        return ["bash", "-c", command]
     if SANDBOX_MODE == "docker":
         return ["docker", "exec", CONTAINER, "bash", "-lc", command]
-    # bubblewrap: read-only system, writable /workspace only, and --unshare-all
-    # cuts off network, other processes, IPC, etc. Add "--share-net" to grant internet.
+
+    extra: list[str] = []
+    if EXPOSE_LLAMA and SOCK_DIR:
+        # Only the socket dir is exposed. Inside, socat re-listens on loopback:PORT.
+        extra = ["--ro-bind", SOCK_DIR, "/run/llama"]
+        command = (
+            f"socat TCP-LISTEN:{LLAMA_PORT},bind=127.0.0.1,fork,reuseaddr "
+            f"UNIX-CONNECT:/run/llama/llama.sock >/dev/null 2>&1 &\n"
+            f"sleep 0.3\n{command}"
+        )
+
+    # bubblewrap: read-only system, writable /workspace only. --unshare-all cuts off
+    # network, other processes, IPC, etc. (Deliberately NO --share-net.)
     return [
         "bwrap",
         "--ro-bind", "/usr", "/usr",
@@ -84,6 +172,7 @@ def sandbox_cmd(command: str) -> list[str]:
         "--dev", "/dev",
         "--tmpfs", "/tmp",
         "--bind", WORKSPACE, "/workspace",
+        *extra,
         "--chdir", "/workspace",
         "--setenv", "HOME", "/workspace",
         "--unshare-all",
@@ -98,24 +187,46 @@ def execute(name: str, args: dict) -> str:
         if name == "get_time":
             return datetime.now().isoformat()
         if name == "run_shell":
+            try:
+                timeout = int(args.get("timeout") or DEFAULT_TIMEOUT)
+            except (TypeError, ValueError):
+                timeout = DEFAULT_TIMEOUT
+            timeout = max(1, min(timeout, MAX_TIMEOUT))
             r = subprocess.run(
                 sandbox_cmd(args["command"]),
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=timeout,
             )
             return truncate(f"exit code: {r.returncode}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}")
         return f"ERROR: unknown tool {name}"
     except subprocess.TimeoutExpired:
-        return "ERROR: command timed out after 30s"
+        return f"ERROR: command timed out after {timeout}s"
+    except KeyError as e:
+        return f"ERROR: missing argument {e}"
     except Exception as e:
         return f"ERROR: {type(e).__name__}: {e}"
 
 
+# --------------------------------------------------------------------------- dev copy
+def sync_dev_copy(force: bool = False) -> None:
+    """Put a copy of this file in the workspace for the model to edit."""
+    if force or not os.path.exists(DEV_COPY):
+        shutil.copyfile(HOST_FILE, DEV_COPY)
+        print(f"[dev copy] {'reset' if force else 'created'}: {DEV_COPY}")
+
+
+def show_diff() -> None:
+    if not os.path.exists(DEV_COPY):
+        sys.exit("No dev copy yet. Run the agent once (or use --sync).")
+    with open(HOST_FILE) as a, open(DEV_COPY) as b:
+        diff = list(difflib.unified_diff(a.readlines(), b.readlines(),
+                                         "agent_local.py (host)", f"{DEV_NAME} (model)"))
+    sys.stdout.writelines(diff or ["No differences.\n"])
+
+
+# --------------------------------------------------------------------------- logging / session
 def log(entry: dict) -> None:
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
-
-
-SESSION_FILE = os.environ.get("SESSION_FILE", "session.json")  # kept outside the sandbox
 
 
 def load_session() -> list:
@@ -131,6 +242,7 @@ def save_session(messages: list) -> None:
         json.dump(messages, f)
 
 
+# --------------------------------------------------------------------------- agent loop
 def run_goal(client: OpenAI, messages: list, goal: str) -> None:
     """Run one goal. `messages` is the running history, so earlier work stays in context."""
     messages.append({"role": "user", "content": f"GOAL: {goal}"})
@@ -150,7 +262,8 @@ def run_goal(client: OpenAI, messages: list, goal: str) -> None:
                 print(f"[llm error] attempt {attempt}/3: {e}")
                 log({"event": "llm_error", "step": step, "attempt": attempt, "error": str(e)})
         if resp is None:
-            print("[STOPPED] the model server kept failing; see agent_run.jsonl")
+            print(f"[STOPPED] the model server kept failing; see {LOG_FILE}")
+            save_session(messages)
             return
         msg = resp.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
@@ -197,15 +310,31 @@ def run_goal(client: OpenAI, messages: list, goal: str) -> None:
     save_session(messages)
 
 
+# --------------------------------------------------------------------------- entry point
 def main() -> None:
     args = sys.argv[1:]
-    if "--new" in args:                      # start a fresh conversation
-        args.remove("--new")
-        if os.path.exists(SESSION_FILE):
-            os.remove(SESSION_FILE)
-    chat = "--chat" in args
-    if chat:
-        args.remove("--chat")
+
+    if "--diff" in args:
+        show_diff()
+        return
+
+    def pop(flag: str) -> bool:
+        if flag in args:
+            args.remove(flag)
+            return True
+        return False
+
+    new, chat, sync = pop("--new"), pop("--chat"), pop("--sync")
+
+    if new and os.path.exists(SESSION_FILE):          # start a fresh conversation
+        os.remove(SESSION_FILE)
+
+    if SANDBOX_MODE == "bwrap":
+        sync_dev_copy(force=sync)
+        if EXPOSE_LLAMA:
+            start_llama_bridge()
+    elif sync:
+        print("[note] --sync only applies in bwrap mode")
 
     client = OpenAI(base_url=LLM_URL, api_key="not-needed-for-local")
     messages = load_session()
@@ -226,7 +355,7 @@ def main() -> None:
             if goal:
                 run_goal(client, messages, goal)
     elif not args:
-        sys.exit('usage: python agent_local.py [--new] [--chat] ["your goal"]')
+        sys.exit('usage: python agent_local.py [--new] [--chat] [--sync] [--diff] ["your goal"]')
 
 
 if __name__ == "__main__":
