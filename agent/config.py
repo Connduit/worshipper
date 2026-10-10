@@ -22,7 +22,7 @@ class Config:
     max_steps: int
     log_file: str
     session_file: str           # kept outside the sandbox
-    use_friends: bool
+    use_friends: bool           # off by default: the agent works solo (--friends turns it on)
     friends_file: str
     max_depth: int              # how deep delegation may nest; 0 = no delegation
     default_timeout: int = 30
@@ -53,7 +53,7 @@ class Config:
             max_steps=int(env.get("MAX_STEPS", "25")),
             log_file=env.get("LOG_FILE", "agent_run.jsonl"),
             session_file=env.get("SESSION_FILE", "session.json"),
-            use_friends=env.get("USE_FRIENDS", "1") == "1",
+            use_friends=env.get("USE_FRIENDS", "0") == "1",
             friends_file=env.get("FRIENDS_FILE", "friends.json"),
             max_depth=int(env.get("MAX_DEPTH", "1")),
         )

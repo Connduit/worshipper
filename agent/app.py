@@ -51,6 +51,8 @@ class App:
         self.sandbox.start()
         self.memory.load()
         self.messages = self.sessions.load(self.system)
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = self.system   # resumed sessions see the current setup (e.g. --friends)
         print(f"[session] {len(self.messages) - 1} earlier messages loaded"
               if len(self.messages) > 1 else "[session] new conversation")
         if self.registry:
