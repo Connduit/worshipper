@@ -76,10 +76,13 @@ class RunShellTool(Tool):
 
 class FinishTool(Tool):
     name = "finish"
-    description = "Call when the goal is complete."
+    description = ("Call when the goal is done. `answer` is shown to the user as the final result, "
+                   "so put the actual answer or result in it: the content itself, not a "
+                   "description of what you did.")
     parameters = {"type": "object",
-                  "properties": {"summary": {"type": "string"}},
-                  "required": ["summary"]}
+                  "properties": {"answer": {"type": "string",
+                                            "description": "The complete final answer or result."}},
+                  "required": ["answer"]}
     is_final = True
 
     def run(self, args: dict, ctx: CallContext) -> str:

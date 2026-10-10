@@ -80,7 +80,7 @@ class App:
     def _report(self, result: RunResult) -> None:
         """Quiet mode: the final result on stdout, or a short explanation on stderr."""
         if result.status == FINISHED:
-            self.console.info(result.text or "(finished, no summary given)")
+            self.console.info(result.text or "(finished without an answer)")
             return
         if result.status == MAX_STEPS:
             msg = f"Stopped: hit the step limit ({self.cfg.max_steps}) without finishing."

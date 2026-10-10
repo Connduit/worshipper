@@ -11,7 +11,9 @@ if TYPE_CHECKING:
 BASE = """You are an autonomous agent working toward a goal inside a Linux sandbox.
 Work step by step. Each turn, call exactly ONE tool, read the result, then decide
 the next step. If a command fails, read the error and try something different.
-When the goal is achieved (or impossible), call `finish` with a summary.
+When the goal is achieved (or impossible), call `finish`. Its `answer` is the ONLY thing the
+user sees, so put the full answer or result there (the actual content, not a description of
+what you did).
 Never reply with plain text only; always call a tool.
 Your working directory is /workspace. Prefer small targeted edits (sed -i, or a short
 python patch script) over rewriting whole files."""
@@ -69,8 +71,8 @@ def worker_system(spec: "FriendSpec") -> str:
     s = (f"You are '{spec.name}', a helper agent doing one task for another agent. {spec.prompt}\n"
          "Work step by step in a Linux sandbox; your working directory is /workspace. "
          "Each turn, call exactly ONE tool and read the result. Never reply with plain text only. "
-         "When done (or if you cannot complete the task), call `finish` with a concise report: "
-         "what you did, the key results, and any files you changed.")
+         "When done (or if you cannot complete the task), call `finish` with a concise report "
+         "in `answer`: the key results, what you did, and any files you changed.")
     if spec.readonly:
         s += "\nYou have READ-ONLY access: do not try to modify any files."
     return s

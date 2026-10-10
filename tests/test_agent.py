@@ -99,10 +99,10 @@ class AgentFlowTest(TmpCase):
             Msg(None, [call("delegate", friend="coder", task="write f.txt")]),            # main
             Msg(None, [call("run_shell", command=f"echo hi > {target}")]),                # worker
             Msg(None, [call("delegate", friend="coder", task="nested")]),                 # not offered
-            Msg(None, [call("finish", summary="wrote f.txt")]),                           # worker
+            Msg(None, [call("finish", answer="wrote f.txt")]),                           # worker
             Msg(None, [call("delegate", friend="nobody", task="x")]),                     # unknown
             Msg("no tool call here"),                                                     # nudged
-            Msg(None, [call("finish", summary="all done")]),
+            Msg(None, [call("finish", answer="all done")]),
         )
         app = self.make_app(llm, USE_FRIENDS="1")
         result = app.run_goal("do the thing")
@@ -135,9 +135,21 @@ class AgentFlowTest(TmpCase):
         app = self.make_app(FakeLLM(None))
         self.assertEqual(app.run_goal("x").status, LLM_FAILED)
 
+    def test_finish_must_carry_the_actual_answer(self):
+        llm = FakeLLM(Msg(None, [call("finish", answer="  ")]),            # empty: rejected, model retries
+                      Msg(None, [call("finish", summary="old name")]),     # old argument name still works
+                      )
+        app = self.make_app(llm)
+        result = app.run_goal("x")
+        self.assertEqual((result.status, result.text), (FINISHED, "old name"))
+        self.assertIn("non-empty `answer`", [m["content"] for m in app.messages if m["role"] == "tool"][0])
+        finish = app.pool.select([], 0)[0].schema()["function"]
+        self.assertEqual(finish["parameters"]["required"], ["answer"])
+        self.assertIn("actual answer", finish["description"])
+
     def test_bad_arguments(self):
         llm = FakeLLM(Msg(None, [call("run_shell")]), Msg(None, [("run_shell", "{not json")]),
-                      Msg(None, [call("finish", summary="ok")]))
+                      Msg(None, [call("finish", answer="ok")]))
         app = self.make_app(llm)
         app.run_goal("x")
         obs = [m["content"] for m in app.messages if m["role"] == "tool"]
@@ -146,7 +158,7 @@ class AgentFlowTest(TmpCase):
 
     def test_shell_timeout(self):
         llm = FakeLLM(Msg(None, [call("run_shell", command="sleep 5", timeout=1)]),
-                      Msg(None, [call("finish", summary="ok")]))
+                      Msg(None, [call("finish", answer="ok")]))
         app = self.make_app(llm)
         app.run_goal("x")
         self.assertIn("timed out after 1s", [m["content"] for m in app.messages if m["role"] == "tool"][0])
@@ -162,7 +174,7 @@ class OutputTest(TmpCase):
 
     def script(self):
         return FakeLLM(Msg("thinking", [call("run_shell", command="echo hi")]),
-                       Msg(None, [call("finish", summary="all done")]))
+                       Msg(None, [call("finish", answer="all done")]))
 
     def test_quiet_by_default_prints_only_the_result(self):
         out, err = self.run_captured(self.script())
@@ -184,8 +196,8 @@ class OutputTest(TmpCase):
         def llm():
             return FakeLLM(Msg(None, [call("ask_friend", friend="planner", message="plan")]), Msg("a plan"),
                            Msg(None, [call("delegate", friend="coder", task="t")]),
-                           Msg(None, [call("finish", summary="worker done")]),
-                           Msg(None, [call("finish", summary="final")]))
+                           Msg(None, [call("finish", answer="worker done")]),
+                           Msg(None, [call("finish", answer="final")]))
         out, _ = self.run_captured(llm(), USE_FRIENDS="1")
         self.assertEqual(out, "final\n")
         out, _ = self.run_captured(llm(), USE_FRIENDS="1", DEBUG="1")
@@ -246,7 +258,7 @@ class FriendConfigTest(TmpCase):
         self.assertNotIn("Workers", app.system)
 
     def test_resume_refreshes_system_prompt(self):
-        app = self.make_app(FakeLLM(Msg(None, [call("finish", summary="a")])))
+        app = self.make_app(FakeLLM(Msg(None, [call("finish", answer="a")])))
         app.run_goal("x")
         solo_prompt = app.system
         app2 = App(Config.from_env(env_for(self.tmp, USE_FRIENDS="1")), llm=FakeLLM())

@@ -48,7 +48,7 @@ calls `finish` or reaches `MAX_STEPS`.
 |------|--------------|
 | `get_time` | current date and time |
 | `run_shell` | run a bash command in the sandbox (default 30 s timeout, max 300 s) |
-| `finish` | end the run with a summary |
+| `finish` | end the run; its `answer` is what gets printed, so it holds the actual answer, not a description of the work |
 | `ask_friend` | ask an advisor (only with `--friends`) |
 | `delegate` | hand a task to a worker (only with `--friends`) |
 
@@ -83,7 +83,7 @@ Built in: `planner`, `reviewer`, `tester`.
 
 **Workers** (`delegate(friend, task)`): full sub-agents with their own system prompt,
 tool loop, shell (same `/workspace`) and step limit. Each task starts fresh and
-returns the worker's `finish` summary. Built in: `coder`, `inspector` (read-only).
+returns the worker's `finish` answer. Built in: `coder`, `inspector` (read-only).
 
 - Friends can't see the main agent's conversation; it has to pass context along.
 - Workers can't delegate further unless `MAX_DEPTH` allows it **and** their `tools`

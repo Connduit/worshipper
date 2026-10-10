@@ -19,7 +19,7 @@ NUDGE = "You must call a tool. Use one of your tools to act, or finish if done."
 @dataclass
 class RunResult:
     status: str         # FINISHED | MAX_STEPS | LLM_FAILED
-    text: str = ""      # finish summary, or the last thing the model said
+    text: str = ""      # the finish answer, or the last thing the model said
 
 
 class Agent:
@@ -65,18 +65,18 @@ class Agent:
                 messages.append({"role": "user", "content": NUDGE})
                 continue
 
-            finished, summary = False, ""
+            finished, answer = False, ""
             for call in msg.tool_calls:
-                observation, done, call_summary = self._handle(call, step)
+                observation, done, call_answer = self._handle(call, step)
                 if done:
-                    finished, summary = True, call_summary
+                    finished, answer = True, call_answer
                 self.console.debug(d, f"[observe] {truncate(observation, 500)}")
                 # Every tool call must get an answer, or the history is invalid next turn.
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": observation})
 
             self.on_save()
             if finished:
-                return RunResult(FINISHED, summary)
+                return RunResult(FINISHED, answer)
 
         self.console.debug(d, f"\n[STOPPED] hit max steps ({self.max_steps})")
         self.log.log("max_steps", agent=self.name, depth=d)
@@ -86,7 +86,7 @@ class Agent:
         return RunResult(MAX_STEPS, last or "")
 
     def _handle(self, call, step: int) -> tuple[str, bool, str]:
-        """Run one tool call. Returns (observation, finished?, finish summary)."""
+        """Run one tool call. Returns (observation, finished?, the finish answer)."""
         name = call.function.name
         try:
             args = json.loads(call.function.arguments or "{}")
@@ -95,7 +95,7 @@ class Agent:
         if not isinstance(args, dict):
             args = None
 
-        done, summary = False, ""
+        done, answer = False, ""
         tool = self.tools.get(name)
         if args is None:
             observation = "ERROR: tool arguments were not valid JSON. Try again."
@@ -103,17 +103,22 @@ class Agent:
             observation = f"ERROR: tool {name} is not available to you. Available: {sorted(self.tools)}"
         else:
             if tool.is_final:
-                summary = args.get("summary") or ""
-                self.console.debug(self.depth, f"\n[DONE] {summary}")
-                self.log.log("finish", agent=self.name, depth=self.depth, step=step, summary=summary)
-                done = True
+                answer = str(args.get("answer") or args.get("summary") or "").strip()   # old name still accepted
+                if answer:
+                    self.console.debug(self.depth, f"\n[DONE] {answer}")
+                    self.log.log("finish", agent=self.name, depth=self.depth, step=step, answer=answer)
+                    done = True
+                    observation = self._run_tool(tool, args)
+                else:       # an empty finish would leave the user with nothing; make the model retry
+                    observation = ("ERROR: finish needs a non-empty `answer`. Put the actual answer "
+                                   "or result in it, not a description of what you did.")
             else:
                 self.console.debug(self.depth, f"[act] {name}({args})")
-            observation = self._run_tool(tool, args)
+                observation = self._run_tool(tool, args)
 
         self.log.log("step", agent=self.name, depth=self.depth, step=step,
                      tool=name, args=args, observation=observation)
-        return observation, done, summary
+        return observation, done, answer
 
     def _run_tool(self, tool: Tool, args: dict) -> str:
         try:
