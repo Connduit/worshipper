@@ -22,10 +22,22 @@ llama-server -m model.gguf --jinja -c 16384 -np 2 --port 8080
 python agent_local.py "list the files in /workspace and summarize them"
 python agent_local.py --new --chat            # interactive, fresh conversation
 python agent_local.py --friends "goal"        # let the agent use friends
+python agent_local.py --debug "goal"          # show every step
 ```
 
 The agent works **solo by default**. Friends only exist when you pass `--friends`
 (or set `USE_FRIENDS=1`).
+
+## Output
+
+Quiet by default: stdout gets only the agent's final result, so it is safe to pipe
+(`python agent_local.py "..." > answer.txt`). If a run doesn't finish (step limit,
+model server failing) a short explanation goes to stderr instead. Warnings such as an
+unreadable `friends.json` also go to stderr.
+
+`--debug` (or `DEBUG=1`) shows everything as it happens: the model's reasoning, each
+tool call and its result, and friend activity (indented for workers). Steps are always
+written to `LOG_FILE`, even in quiet mode, so you can inspect a run afterwards.
 
 ## How it works
 
@@ -115,7 +127,7 @@ Invalid entries are skipped with a warning.
 On first run in bwrap mode, `agent_local.py`, `agent/` and `tests/` are copied to
 `workspace/agent_dev/`. If you ask the agent to improve itself, it edits **that copy**
 and never the code that builds the jail. It is told to verify every change with
-`compileall`, the unit tests, and a real end-to-end run before finishing.
+`compileall`, the unit tests, and a real end-to-end run (with `--debug`) before finishing.
 
 You review and promote its work by hand:
 
@@ -142,6 +154,7 @@ python agent_local.py --sync                                # reset the dev copy
 | `SESSION_FILE` | `session.json` | saved conversation (kept outside the sandbox) |
 | `LOG_FILE` | `agent_run.jsonl` | JSON-lines log of every step |
 | `USE_FRIENDS` | `0` | `1` = same as `--friends` |
+| `DEBUG` | `0` | `1` = same as `--debug` |
 | `FRIENDS_FILE` | `friends.json` | optional file that adds/replaces friends |
 | `MAX_DEPTH` | `1` | how deep delegation may nest; `0` disables `delegate` |
 
@@ -158,11 +171,12 @@ agent/
   friends.py            friend config, FriendService, ask_friend / delegate
   sandbox.py            bwrap / docker / none sandboxes, LlamaBridge
   llm.py                LLM client with retries
+  console.py            Console: quiet by default, --debug shows every step
   prompts.py            system prompts
   storage.py            EventLog, SessionStore, FriendMemory
   devcopy.py            the model's editable copy (sync / diff)
   config.py             Config dataclass, read from env vars
-  util.py               truncate(), say()
+  util.py               truncate()
 tests/test_agent.py     unit tests
 ```
 

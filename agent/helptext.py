@@ -5,6 +5,7 @@ usage: python agent_local.py [options] ["goal"]
 
 Run a local-LLM agent toward a goal. Everything that is not an option is the goal.
 With a goal the agent runs it and exits; with --chat it then keeps asking for more.
+Quiet by default: only the final result is printed (problems go to stderr).
 
 options:
   -h, --help       Show this help and exit.
@@ -15,12 +16,15 @@ options:
   --friends        Let the agent use friends (ask_friend / delegate). Off by default:
                    the agent works solo.
   --list-friends   List the available friends and exit.
+  --debug          Show every step: the model's reasoning, tool calls and results,
+                   and friend activity. (Steps are always saved to the log file.)
   --sync           Reset the model's dev copy (workspace/agent_dev/) from the host
                    code, discarding its edits. bwrap mode only.
   --diff           Show host code vs. the model's dev copy, then exit.
 
 examples:
   python agent_local.py "list the files in /workspace and summarize them"
+  python agent_local.py --debug --new "run the tests and fix what fails"
   python agent_local.py --new --chat
   python agent_local.py --friends "add a --version flag, have the reviewer check it"
   python agent_local.py --diff

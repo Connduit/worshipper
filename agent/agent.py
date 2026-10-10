@@ -5,10 +5,11 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
+from .console import Console
 from .llm import LLM
 from .storage import EventLog
 from .tools import CallContext, Tool
-from .util import say, truncate
+from .util import truncate
 
 FINISHED, MAX_STEPS, LLM_FAILED = "finished", "max_steps", "llm_failed"
 
@@ -25,13 +26,14 @@ class Agent:
     """Runs one conversation. Used for the main agent (depth 0) and for delegated workers."""
 
     def __init__(self, name: str, llm: LLM, tools: list[Tool], max_steps: int, log: EventLog,
-                 *, depth: int = 0, readonly: bool = False,
+                 console: Console, *, depth: int = 0, readonly: bool = False,
                  on_save: Callable[[], None] | None = None):
         self.name = name
         self.llm = llm
         self.tools = {t.name: t for t in tools}
         self.max_steps = max_steps
         self.log = log
+        self.console = console
         self.depth = depth
         self.readonly = readonly
         self.on_save = on_save or (lambda: None)
@@ -46,17 +48,17 @@ class Agent:
         tag = "" if d == 0 else f"{self.name} "
 
         for step in range(1, self.max_steps + 1):
-            say(d, f"\n===== {tag}step {step} =====")
+            self.console.debug(d, f"\n===== {tag}step {step} =====")
             resp = self.llm.chat(messages, self.schemas, depth=d, label=self.name, step=step)
             if resp is None:
-                say(d, f"[STOPPED] the model server kept failing; see {self.log.path}")
+                self.console.debug(d, f"[STOPPED] the model server kept failing; see {self.log.path}")
                 self.on_save()
                 return RunResult(LLM_FAILED)
             msg = resp.choices[0].message
             messages.append(msg.model_dump(exclude_none=True))
 
             if msg.content:
-                say(d, f"[reason] {msg.content.strip()}")
+                self.console.debug(d, f"[reason] {msg.content.strip()}")
 
             # Small local models sometimes forget to call a tool; nudge them.
             if not msg.tool_calls:
@@ -68,7 +70,7 @@ class Agent:
                 observation, done, call_summary = self._handle(call, step)
                 if done:
                     finished, summary = True, call_summary
-                say(d, f"[observe] {truncate(observation, 500)}")
+                self.console.debug(d, f"[observe] {truncate(observation, 500)}")
                 # Every tool call must get an answer, or the history is invalid next turn.
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": observation})
 
@@ -76,7 +78,7 @@ class Agent:
             if finished:
                 return RunResult(FINISHED, summary)
 
-        say(d, f"\n[STOPPED] hit max steps ({self.max_steps})")
+        self.console.debug(d, f"\n[STOPPED] hit max steps ({self.max_steps})")
         self.log.log("max_steps", agent=self.name, depth=d)
         self.on_save()
         last = next((m.get("content") for m in reversed(messages)
@@ -102,11 +104,11 @@ class Agent:
         else:
             if tool.is_final:
                 summary = args.get("summary") or ""
-                say(self.depth, f"\n[DONE] {summary}")
+                self.console.debug(self.depth, f"\n[DONE] {summary}")
                 self.log.log("finish", agent=self.name, depth=self.depth, step=step, summary=summary)
                 done = True
             else:
-                say(self.depth, f"[act] {name}({args})")
+                self.console.debug(self.depth, f"[act] {name}({args})")
             observation = self._run_tool(tool, args)
 
         self.log.log("step", agent=self.name, depth=self.depth, step=step,

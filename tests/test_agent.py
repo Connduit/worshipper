@@ -20,6 +20,7 @@ from agent import cli                                          # noqa: E402
 from agent.agent import FINISHED, LLM_FAILED, MAX_STEPS, Agent  # noqa: E402
 from agent.app import App                                      # noqa: E402
 from agent.config import Config                                # noqa: E402
+from agent.console import Console                              # noqa: E402
 from agent.devcopy import DevCopy                              # noqa: E402
 from agent.friends import FriendRegistry, FriendSpec           # noqa: E402
 from agent.llm import LLM                                      # noqa: E402
@@ -76,9 +77,10 @@ class TmpCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
-        out = contextlib.redirect_stdout(io.StringIO())     # keep test output quiet
-        out.__enter__()
-        self.addCleanup(out.__exit__, None, None, None)
+        for redirect in (contextlib.redirect_stdout, contextlib.redirect_stderr):   # keep test output quiet
+            ctx = redirect(io.StringIO())
+            ctx.__enter__()
+            self.addCleanup(ctx.__exit__, None, None, None)
 
     def make_app(self, llm, **extra):
         app = App(Config.from_env(env_for(self.tmp, **extra)), llm=llm)
@@ -148,6 +150,56 @@ class AgentFlowTest(TmpCase):
         app = self.make_app(llm)
         app.run_goal("x")
         self.assertIn("timed out after 1s", [m["content"] for m in app.messages if m["role"] == "tool"][0])
+
+
+class OutputTest(TmpCase):
+    def run_captured(self, llm, **extra):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            app = self.make_app(llm, **extra)
+            app.run_goal("x")
+        return out.getvalue(), err.getvalue()
+
+    def script(self):
+        return FakeLLM(Msg("thinking", [call("run_shell", command="echo hi")]),
+                       Msg(None, [call("finish", summary="all done")]))
+
+    def test_quiet_by_default_prints_only_the_result(self):
+        out, err = self.run_captured(self.script())
+        self.assertEqual((out, err), ("all done\n", ""))
+
+    def test_debug_shows_every_step_without_repeating_the_result(self):
+        out, err = self.run_captured(self.script(), DEBUG="1")
+        for text in ("[session]", "===== step 1", "[reason] thinking", "[act] run_shell",
+                     "[observe]", "[DONE] all done"):
+            self.assertIn(text, out)
+        self.assertEqual(out.count("all done"), 1)
+        self.assertEqual(err, "")
+
+    def test_quiet_mode_still_logs_steps(self):
+        self.run_captured(self.script())
+        self.assertIn('"tool": "run_shell"', Path(f"{self.tmp}/l.jsonl").read_text())
+
+    def test_workers_and_advisors_are_silent_unless_debug(self):
+        def llm():
+            return FakeLLM(Msg(None, [call("ask_friend", friend="planner", message="plan")]), Msg("a plan"),
+                           Msg(None, [call("delegate", friend="coder", task="t")]),
+                           Msg(None, [call("finish", summary="worker done")]),
+                           Msg(None, [call("finish", summary="final")]))
+        out, _ = self.run_captured(llm(), USE_FRIENDS="1")
+        self.assertEqual(out, "final\n")
+        out, _ = self.run_captured(llm(), USE_FRIENDS="1", DEBUG="1")
+        self.assertIn("[ask planner]", out)
+        self.assertIn("    ===== coder step 1", out)
+
+    def test_failures_explain_themselves_on_stderr(self):
+        out, err = self.run_captured(FakeLLM(Msg("hmm"), Msg("hmm")), MAX_STEPS="2")
+        self.assertEqual(out, "")
+        self.assertIn("step limit (2)", err)
+        self.assertIn("--debug", err)
+        out, err = self.run_captured(FakeLLM(None))
+        self.assertEqual(out, "")
+        self.assertIn("kept failing", err)
 
 
 class FriendConfigTest(TmpCase):
@@ -271,7 +323,7 @@ class LLMRetryTest(TmpCase):
         stub.APIStatusError, stub.APIConnectionError = RuntimeError, self.ConnErr
         stub.OpenAI = lambda **kw: NS(chat=NS(completions=NS(create=create)))
         with mock.patch.dict(sys.modules, {"openai": stub}):
-            return LLM("http://x/v1", "m", EventLog(f"{self.tmp}/l.jsonl"))
+            return LLM("http://x/v1", "m", EventLog(f"{self.tmp}/l.jsonl"), Console())
 
     def test_retries_with_rising_temperature(self):
         temps = []
@@ -301,7 +353,7 @@ class DevCopyTest(TmpCase):
         dc = DevCopy(src, dest)
         with self.assertRaises(FileNotFoundError):
             dc.diff()
-        dc.sync()
+        self.assertEqual(dc.sync(), "created")
         self.assertEqual(dc.diff(), [])
         (dest / "agent" / "m.py").write_text("x = 2\n")
         (dest / "agent" / "new.py").write_text("y = 1\n")
@@ -309,9 +361,9 @@ class DevCopyTest(TmpCase):
         self.assertIn("-x = 1", diff)
         self.assertIn("+x = 2", diff)
         self.assertIn("agent/new.py (model)", diff)
-        dc.sync()                                   # no force: keeps the model's edits
+        self.assertIsNone(dc.sync())                # no force: keeps the model's edits
         self.assertEqual((dest / "agent" / "m.py").read_text(), "x = 2\n")
-        dc.sync(force=True)
+        self.assertEqual(dc.sync(force=True), "reset")
         self.assertEqual(dc.diff(), [])
         self.assertFalse((dest / "agent" / "new.py").exists())
 
@@ -325,7 +377,7 @@ class CliTest(TmpCase):
 
     def test_help_only_describes_flags(self):
         out = self.run_cli("-h")
-        for flag in ("--new", "--chat", "--friends", "--list-friends", "--sync", "--diff"):
+        for flag in ("--new", "--chat", "--friends", "--list-friends", "--debug", "--sync", "--diff"):
             self.assertIn(flag, out)
         self.assertIn("README.md", out)
         for noise in ("MAX_DEPTH", "SANDBOX_MODE", "pacman", "friends.json"):
@@ -345,6 +397,13 @@ class CliTest(TmpCase):
                     mock.patch("agent.app.App") as app_cls:
                 cli.main(argv)
             self.assertEqual(app_cls.call_args.args[0].use_friends, expected)
+
+    def test_debug_flag_turns_debug_on(self):
+        for argv, expected in ((["goal"], False), (["--debug", "goal"], True)):
+            with mock.patch.dict(os.environ, {**env_for(self.tmp), "DEBUG": "0"}), \
+                    mock.patch("agent.app.App") as app_cls:
+                cli.main(argv)
+            self.assertEqual(app_cls.call_args.args[0].debug, expected)
 
     def test_unknown_flag_is_an_error(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

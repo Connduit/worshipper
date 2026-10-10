@@ -8,7 +8,7 @@ import sys
 from .helptext import HELP
 
 USAGE = ('usage: python agent_local.py [-h] [--new] [--chat] [--friends] [--list-friends] '
-         '[--sync] [--diff] ["your goal"]\nrun with -h for details')
+         '[--debug] [--sync] [--diff] ["your goal"]\nrun with -h for details')
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--chat", action="store_true")
     p.add_argument("--friends", action="store_true")
     p.add_argument("--list-friends", action="store_true")
+    p.add_argument("--debug", action="store_true")
     p.add_argument("--sync", action="store_true")
     p.add_argument("--diff", action="store_true")
     p.add_argument("goal", nargs="*")
@@ -37,6 +38,8 @@ def main(argv: list[str] | None = None) -> None:
     cfg = Config.from_env()
     if args.friends:
         cfg = dataclasses.replace(cfg, use_friends=True)
+    if args.debug:
+        cfg = dataclasses.replace(cfg, debug=True)
 
     if args.diff:
         from .devcopy import DevCopy
