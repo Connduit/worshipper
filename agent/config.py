@@ -25,6 +25,7 @@ class Config:
     use_friends: bool           # off by default: the agent works solo (--friends turns it on)
     friends_file: str
     max_depth: int              # how deep delegation may nest; 0 = no delegation
+    debug: bool                 # show every step (--debug); off = only the result
     default_timeout: int = 30
     max_timeout: int = 300
     max_friend_history: int = 12    # messages kept per advisor (even, so pairs stay intact)
@@ -56,4 +57,5 @@ class Config:
             use_friends=env.get("USE_FRIENDS", "0") == "1",
             friends_file=env.get("FRIENDS_FILE", "friends.json"),
             max_depth=int(env.get("MAX_DEPTH", "1")),
+            debug=env.get("DEBUG", "0") == "1",
         )

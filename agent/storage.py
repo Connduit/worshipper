@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 
 class EventLog:
@@ -54,7 +55,7 @@ class FriendMemory:
             with open(self.path) as f:
                 data = json.load(f)
         except (OSError, ValueError) as e:
-            print(f"[warn] could not read {self.path}: {e}")
+            print(f"[warn] could not read {self.path}: {e}", file=sys.stderr)
             return
         if isinstance(data, dict):
             self._data = {k: v for k, v in data.items()

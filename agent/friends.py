@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import Callable
 
 from .agent import FINISHED, MAX_STEPS, Agent
 from .config import Config
+from .console import Console
 from .llm import LLM
 from .prompts import worker_system
 from .storage import EventLog, FriendMemory
 from .tools import CallContext, Tool, ToolPool
-from .util import say, truncate
+from .util import truncate
 
 KINDS = ("advisor", "worker")
 DEFAULT_WORKER_TOOLS = ("run_shell", "get_time")
@@ -117,13 +119,13 @@ class FriendRegistry:
                     else:
                         raw[name] = entry
             except (OSError, ValueError) as e:      # JSONDecodeError is a ValueError
-                print(f"[warn] could not read {path}: {e}")
+                print(f"[warn] could not read {path}: {e}", file=sys.stderr)
         specs = {}
         for name, entry in raw.items():
             try:
                 specs[name] = FriendSpec.from_dict(name, entry)
             except ValueError as e:
-                print(f"[warn] ignoring friend {name!r}: {e}")
+                print(f"[warn] ignoring friend {name!r}: {e}", file=sys.stderr)
         return cls(specs)
 
     def __bool__(self) -> bool:
@@ -171,14 +173,15 @@ class FriendService:
     """Does the actual asking and delegating."""
 
     def __init__(self, cfg: Config, registry: FriendRegistry, default_llm: LLM,
-                 memory: FriendMemory, log: EventLog,
+                 memory: FriendMemory, log: EventLog, console: Console,
                  llm_factory: Callable[[str, str], LLM] | None = None):
         self.cfg = cfg
         self.registry = registry
         self.default_llm = default_llm
         self.memory = memory
         self.log = log
-        self._make_llm = llm_factory or (lambda url, model: LLM(url, model, log))
+        self.console = console
+        self._make_llm = llm_factory or (lambda url, model: LLM(url, model, log, console))
         self._llms: dict[tuple[str, str], LLM] = {}
         self.tool_pool: ToolPool | None = None      # set by App; workers pick their tools from it
 
@@ -204,7 +207,7 @@ class FriendService:
         message = str(message)
 
         history = self.memory.prepare(spec.name, spec.prompt, message)
-        say(depth, f"[ask {spec.name}] {truncate(message, 300)}")
+        self.console.debug(depth, f"[ask {spec.name}] {truncate(message, 300)}")
         resp = self._llm_for(spec).chat(history, depth=depth, label=spec.name)
         if resp is None:
             self.memory.rollback(spec.name)
@@ -212,7 +215,7 @@ class FriendService:
         reply = (resp.choices[0].message.content or "").strip() or "(no reply)"
         self.memory.commit(spec.name, reply)
         self.log.log("ask_friend", friend=spec.name, depth=depth, message=message, reply=reply)
-        say(depth, f"[{spec.name} replies] {truncate(reply, 500)}")
+        self.console.debug(depth, f"[{spec.name} replies] {truncate(reply, 500)}")
         return truncate(reply)
 
     def delegate(self, name, task, depth: int) -> str:
@@ -231,10 +234,10 @@ class FriendService:
             raise RuntimeError("FriendService.tool_pool was not set")
 
         agent = Agent(spec.name, self._llm_for(spec), self.tool_pool.select(spec.tools, depth + 1),
-                      spec.max_steps, self.log, depth=depth + 1, readonly=spec.readonly)
+                      spec.max_steps, self.log, self.console, depth=depth + 1, readonly=spec.readonly)
         messages = [{"role": "system", "content": worker_system(spec)},
                     {"role": "user", "content": f"TASK: {task}"}]
-        say(depth, f"[delegate -> {spec.name}] {truncate(str(task), 300)}")
+        self.console.debug(depth, f"[delegate -> {spec.name}] {truncate(str(task), 300)}")
         self.log.log("delegate", friend=spec.name, depth=depth, task=task)
 
         result = agent.run(messages)

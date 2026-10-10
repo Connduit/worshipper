@@ -53,7 +53,7 @@ and verify every change before calling finish:
      run_shell with timeout=120 and command:
        cd {d} && SANDBOX_MODE=none LLM_URL=http://127.0.0.1:{cfg.llama_port}/v1 \\
        SESSION_FILE=/tmp/s.json LOG_FILE=/tmp/l.jsonl WORKSPACE=/workspace MAX_STEPS=6 \\
-       python agent_local.py --new "run: echo hello, then finish"
+       python agent_local.py --debug --new "run: echo hello, then finish"
      It passes if the output shows [DONE] and no Traceback.
 Report what you changed and what the tests showed."""
 

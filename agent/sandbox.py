@@ -77,7 +77,8 @@ class LlamaBridge:
             if os.path.exists(sock):
                 return
             time.sleep(0.1)
-        print("[warn] llama bridge socket did not appear; the sandbox won't reach llama-server")
+        print("[warn] llama bridge socket did not appear; the sandbox won't reach llama-server",
+              file=sys.stderr)
 
 
 class BwrapSandbox(Sandbox):

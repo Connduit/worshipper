@@ -13,7 +13,8 @@ Layout (arrows = "depends on"; nothing below imports anything above it)
     storage.py      EventLog, SessionStore, FriendMemory
     devcopy.py      DevCopy: the model's editable copy of this code
     config.py       Config: every setting, read from env vars
-    util.py         truncate(), say()
+    console.py      Console: quiet by default, --debug shows every step
+    util.py         truncate()
 
 To add a tool: subclass Tool in tools.py, add an instance in App.__init__.
 To add a sandbox: subclass Sandbox in sandbox.py and extend make_sandbox().

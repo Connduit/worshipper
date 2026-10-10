@@ -19,11 +19,14 @@ class DevCopy:
         self.source_root = source_root
         self.dest = dest
 
-    def sync(self, force: bool = False) -> None:
-        """Create the dev copy, or (force) wipe it and start over from the host code."""
+    def sync(self, force: bool = False) -> str | None:
+        """Create the dev copy, or (force) wipe it and start over from the host code.
+
+        Returns "created", "reset", or None if it already existed and was left alone.
+        """
         existed = self.dest.exists()
         if existed and not force:
-            return
+            return None
         if existed:
             shutil.rmtree(self.dest)
         self.dest.mkdir(parents=True)
@@ -33,7 +36,7 @@ class DevCopy:
                 shutil.copytree(src, self.dest / item, ignore=IGNORE)
             elif src.is_file():
                 shutil.copy2(src, self.dest / item)
-        print(f"[dev copy] {'reset' if existed else 'created'}: {self.dest}")
+        return "reset" if existed else "created"
 
     def diff(self) -> list[str]:
         """Unified diff of every .py file, host vs. the model's copy."""
