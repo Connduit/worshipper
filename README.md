@@ -123,9 +123,59 @@ The agent keeps its conversation between runs (saved in `session.json`), so you 
 
 Always check the results yourself (`ls workspace`, `cat workspace/...`) instead of trusting the agent's summary.
 
+### Choosing a coding model
+
+`run.sh` accepts a model name and optional server URL before the goal or agent
+options. It selects the API model ID; it does **not** download or switch the
+weights loaded by `llama-server`.
+
+For Qwen3-Coder-30B-A3B-Instruct, download a **Q4_K_M GGUF** from a trusted
+publisher linked from the model's official Hugging Face page. Use a recent
+llama.cpp build with support for this model. On a 24 GB RTX 4090, begin with a
+4096-token context; weights plus the context cache must fit in VRAM. Larger
+contexts may need CPU offloading and can slow generation.
+
+Stop your existing server first (`systemctl --user stop llama` if using the
+documented service), then start Qwen using the actual downloaded file path:
+
+```bash
+llama-server -m /absolute/path/to/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf \
+  --alias qwen3-coder --jinja -ngl 99 -c 4096 -np 1 \
+  --host 127.0.0.1 --port 8080
+```
+
+In another terminal, confirm `/v1/models` lists `qwen3-coder`, then run a fresh
+conversation so history from another model is not reused:
+
+```bash
+curl --fail http://localhost:8080/v1/models
+SESSION_FILE=session-qwen.json ./run.sh --model qwen --new \
+  "Write a Python script that prints the first 20 primes, run it, and report the output"
+```
+
+To switch back, stop the Qwen server and start the original model with an
+explicit API alias:
+
+```bash
+llama-server -hf ggml-org/gpt-oss-20b-GGUF --alias gpt-oss-20b \
+  --jinja -ngl 99 -c 32768 -np 1 --host 127.0.0.1 --port 8080
+```
+
+Then use `./run.sh --model gpt-oss "your goal"`. If you run servers on different
+ports, select both the model and its endpoint:
+
+```bash
+./run.sh --model qwen --url http://localhost:8081/v1 "your goal"
+```
+
+`LLM_MODEL` and `LLM_URL` environment variables also work; command-line options
+take precedence. Any other `--model` value is passed through as the server's
+model ID. Keep servers bound to loopback for local use.
+
 ### Configuration (environment variables)
 
-Set in `run.sh`:
+Defaults below describe `agent_local.py`; `run.sh` defaults to port 8080 and
+`gpt-oss-20b`, while respecting environment overrides:
 
 | Variable | Default | Meaning |
 |---|---|---|
