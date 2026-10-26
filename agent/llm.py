@@ -5,6 +5,9 @@ from .console import Console
 from .storage import EventLog
 
 
+AUTO_MODEL = ("", "auto", "local")   # "ask the server which model it is serving"
+
+
 class LLM:
     """One chat-completions endpoint + model, with retries."""
 
@@ -20,6 +23,20 @@ class LLM:
         self._console = console
         self._errors = (APIStatusError, APIConnectionError)
         self._client = OpenAI(base_url=base_url, api_key=api_key)
+        self._resolved: str | None = None
+
+    @property
+    def model_name(self) -> str:
+        """The model to send and log. For auto/local, ask the server once (so switching
+        models with ./model.sh needs no config change); falls back to the configured name."""
+        if self.model not in AUTO_MODEL:
+            return self.model
+        if self._resolved is None:
+            try:
+                self._resolved = self._client.with_options(timeout=5).models.list().data[0].id
+            except Exception:       # server down or an unusual server: try again next time
+                return self.model
+        return self._resolved
 
     def chat(self, messages: list, tools: list | None = None, *, depth: int = 0,
              label: str = "main", step: int | None = None):
@@ -29,7 +46,7 @@ class LLM:
         """
         for attempt, temperature in enumerate(self.TEMPERATURES, start=1):
             try:
-                kwargs = dict(model=self.model, messages=messages, temperature=temperature)
+                kwargs = dict(model=self.model_name, messages=messages, temperature=temperature)
                 if tools:
                     kwargs["tools"] = tools
                 return self._client.chat.completions.create(**kwargs)

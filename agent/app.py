@@ -63,13 +63,14 @@ class App:
             self.messages[0]["content"] = self.system   # resumed sessions see the current setup (e.g. --friends)
         self.console.debug(0, f"[session] {len(self.messages) - 1} earlier messages loaded"
                            if len(self.messages) > 1 else "[session] new conversation")
+        self.console.debug(0, f"[model] {self.llm.model_name}")
         if self.registry:
             self.console.debug(0, f"[friends] {', '.join(self.registry.names())}")
 
     def run_goal(self, goal: str) -> RunResult:
         """Run one goal and report the outcome. History is kept, so earlier work stays in context."""
         self.messages.append({"role": "user", "content": f"GOAL: {goal}"})
-        self.log.log("start", goal=goal, model=self.cfg.model)
+        self.log.log("start", goal=goal, model=self.llm.model_name)
         agent = Agent("main", self.llm, self.pool.select(MAIN_TOOLS, 0), self.cfg.max_steps,
                       self.log, self.console, on_save=lambda: self.sessions.save(self.messages))
         result = agent.run(self.messages)

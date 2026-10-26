@@ -139,12 +139,28 @@ python agent_local.py --sync                                # reset the dev copy
 
 `--sync` wipes `workspace/agent_dev/` and recopies it.
 
+## Switching models
+
+`model.sh` rewrites `deploy/llama.service` for the chosen model, restarts the systemd
+service and waits until the server answers:
+
+```bash
+./model.sh gptoss          # gpt-oss-20b (fast, general)
+./model.sh qwen-coder      # Qwen3-Coder-30B-A3B-Instruct, Q4_K_M (heavier coding)
+./model.sh status          # what is running now
+CTX=8192 NP=1 ./model.sh qwen-coder     # per-slot context / parallel slots
+```
+
+`CTX` is the context **per slot**; the server gets `CTX x NP` in total. The defaults keep
+the total VRAM use the same as a single slot would. Switching mid-conversation is not
+recommended (the saved history is in the other model's format): follow it with `--new`.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `LLM_URL` | `http://127.0.0.1:$LLAMA_PORT/v1` | OpenAI-compatible base URL |
-| `LLM_MODEL` | `local` | model name sent to the server (llama-server mostly ignores it) |
+| `LLM_MODEL` | `auto` | model name sent to the server. `auto` (or `local`) asks the server what it is serving, so it follows `./model.sh` switches. Don't pin it in `run.sh`. |
 | `LLAMA_PORT` | `8080` | port of your llama-server |
 | `WORKSPACE` | `<repo>/workspace` | the one directory writable from the jail |
 | `SANDBOX_MODE` | `bwrap` | `bwrap`, `docker` or `none` |

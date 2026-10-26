@@ -51,6 +51,7 @@ class Msg:
 class FakeLLM:
     """Replays scripted messages in order and records every call. Stands in for LLM."""
     base_url, model = "http://fake/v1", "fake"
+    model_name = "fake"
 
     def __init__(self, *script):
         self.script = list(script)
@@ -354,6 +355,35 @@ class LLMRetryTest(TmpCase):
         self.assertIsNone(self.make_llm(create).chat([]))
         self.assertEqual(create.call_count, 3)
         self.assertEqual(Path(f"{self.tmp}/l.jsonl").read_text().count("llm_error"), 3)
+
+
+class ModelNameTest(TmpCase):
+    def make_llm(self, model, client):
+        stub = types.ModuleType("openai")
+        stub.APIStatusError = stub.APIConnectionError = RuntimeError
+        stub.OpenAI = lambda **kw: client
+        with mock.patch.dict(sys.modules, {"openai": stub}):
+            return LLM("http://x/v1", model, EventLog(f"{self.tmp}/l.jsonl"), Console())
+
+    def client(self, list_models):
+        c = NS(models=NS(list=list_models))
+        c.with_options = lambda **kw: c
+        return c
+
+    def test_explicit_model_is_used_without_asking(self):
+        lst = mock.Mock()
+        self.assertEqual(self.make_llm("m", self.client(lst)).model_name, "m")
+        lst.assert_not_called()
+
+    def test_auto_asks_the_server_once(self):
+        lst = mock.Mock(return_value=NS(data=[NS(id="qwen3-coder")]))
+        llm = self.make_llm("auto", self.client(lst))
+        self.assertEqual((llm.model_name, llm.model_name), ("qwen3-coder", "qwen3-coder"))
+        self.assertEqual(lst.call_count, 1)
+
+    def test_auto_falls_back_when_the_server_is_unreachable(self):
+        llm = self.make_llm("local", self.client(mock.Mock(side_effect=OSError("down"))))
+        self.assertEqual(llm.model_name, "local")
 
 
 class DevCopyTest(TmpCase):

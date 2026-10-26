@@ -14,7 +14,7 @@ DEV_NAME = "agent_dev"                          # the model's copy lives in <wor
 class Config:
     llama_port: int
     llm_url: str
-    model: str                  # llama-server mostly ignores this
+    model: str                  # "auto" = ask the server what it is serving
     sandbox_mode: str           # "bwrap" | "docker" | "none"
     container: str              # docker mode only
     workspace: Path
@@ -46,7 +46,7 @@ class Config:
         return cls(
             llama_port=port,
             llm_url=env.get("LLM_URL", f"http://127.0.0.1:{port}/v1"),
-            model=env.get("LLM_MODEL", "local"),
+            model=env.get("LLM_MODEL", "auto"),
             sandbox_mode=env.get("SANDBOX_MODE", "bwrap"),
             container=env.get("SANDBOX", "agent-sandbox"),
             workspace=Path(os.path.abspath(os.path.expanduser(workspace))),
