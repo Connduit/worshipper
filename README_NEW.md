@@ -141,19 +141,43 @@ python agent_local.py --sync                                # reset the dev copy
 
 ## Switching models
 
-`model.sh` rewrites `deploy/llama.service` for the chosen model, restarts the systemd
-service and waits until the server answers:
+`model.sh` rewrites `deploy/llama.service` for the model you name, restarts the systemd
+service and waits until the model is loaded. It accepts an alias, **any Hugging Face GGUF
+repo**, or a local file:
 
 ```bash
-./model.sh gptoss          # gpt-oss-20b (fast, general)
-./model.sh qwen-coder      # Qwen3-Coder-30B-A3B-Instruct, Q4_K_M (heavier coding)
-./model.sh status          # what is running now
-CTX=8192 NP=1 ./model.sh qwen-coder     # per-slot context / parallel slots
+./model.sh qwen-coder                                   # alias: Qwen3-Coder-30B-A3B-Instruct, Q4_K_M
+./model.sh gptoss                                       # alias: gpt-oss-20b
+./model.sh bartowski/Qwen2.5-Coder-14B-Instruct-GGUF    # any HF repo (Q4_K_M if it has one)
+./model.sh org/some-model-GGUF:Q5_K_M                   # pick a quantization
+./model.sh ~/models/my-model.gguf                       # a local file
+./model.sh status                                       # what is running now
+./model.sh list                                         # aliases + models already downloaded
 ```
 
-`CTX` is the context **per slot**; the server gets `CTX x NP` in total. The defaults keep
-the total VRAM use the same as a single slot would. Switching mid-conversation is not
-recommended (the saved history is in the other model's format): follow it with `--new`.
+It reports four steps: **[1/4]** check, **[2/4]** restart the server, **[3/4]** download
+(percentage, GB, speed and ETA) and **[4/4]** load the model into the GPU. A model you
+already have is loaded straight from disk, with no network access and no download.
+
+Before touching the running server it checks that the repo exists, that it contains a GGUF
+(and the quantization you asked for), that the model fits in VRAM, and that the disk (and
+the Windows C: drive under WSL) has room. If a check fails it stops and your current server
+keeps running; `FORCE=1` overrides. `DRY_RUN=1` runs the checks and prints the service
+file without changing anything. `WAIT=<seconds>` extends the 1 hour default.
+
+"Ready" means `/health` answers 200. (`/v1/models` answers while the model is still
+loading, so it is not a readiness check.) The agent does the same: at startup it waits for
+`/health` and says so on stderr, and with `--debug` it prints `[waiting for the model... Ns]`
+every 15 s while a request is pending, so a slow model looks different from a hung program.
+
+`CTX` is the context **per slot** (default depends on the model, 8192 for unknown ones) and
+`NP` the number of slots (default 2); the server gets `CTX x NP` in total, which is what
+uses VRAM. `EXTRA="-ctk q8_0 -ctv q8_0"` passes extra flags to `llama-server`. For gated
+models, put `HF_TOKEN=hf_...` in `~/.config/llama-server.env` (outside the repo).
+
+The agent asks the server which model it is serving (`LLM_MODEL=auto`), so nothing else
+changes when you switch. Start a new conversation afterwards (`--new`): the saved history
+is in the other model's format.
 
 ## Environment variables
 

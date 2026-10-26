@@ -63,6 +63,7 @@ class App:
             self.messages[0]["content"] = self.system   # resumed sessions see the current setup (e.g. --friends)
         self.console.debug(0, f"[session] {len(self.messages) - 1} earlier messages loaded"
                            if len(self.messages) > 1 else "[session] new conversation")
+        self.llm.wait_ready()
         self.console.debug(0, f"[model] {self.llm.model_name}")
         if self.registry:
             self.console.debug(0, f"[friends] {', '.join(self.registry.names())}")

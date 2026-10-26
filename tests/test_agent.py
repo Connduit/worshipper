@@ -53,6 +53,9 @@ class FakeLLM:
     base_url, model = "http://fake/v1", "fake"
     model_name = "fake"
 
+    def wait_ready(self, *a, **k):
+        return True
+
     def __init__(self, *script):
         self.script = list(script)
         self.calls = []
@@ -384,6 +387,53 @@ class ModelNameTest(TmpCase):
     def test_auto_falls_back_when_the_server_is_unreachable(self):
         llm = self.make_llm("local", self.client(mock.Mock(side_effect=OSError("down"))))
         self.assertEqual(llm.model_name, "local")
+
+
+class LLMWaitingTest(TmpCase):
+    def make_llm(self, client, console=None):
+        stub = types.ModuleType("openai")
+        stub.APIStatusError = stub.APIConnectionError = RuntimeError
+        stub.OpenAI = lambda **kw: client
+        with mock.patch.dict(sys.modules, {"openai": stub}):
+            return LLM("http://x/v1", "m", EventLog(f"{self.tmp}/l.jsonl"), console or Console())
+
+    @staticmethod
+    def http_error(code):
+        import io, urllib.error
+        return urllib.error.HTTPError("http://x/health", code, "x", {}, io.BytesIO(b""))
+
+    def test_ready_server_returns_at_once(self):
+        with mock.patch("agent.llm._urlreq.urlopen") as op:
+            self.assertTrue(self.make_llm(NS()).wait_ready(poll=0))
+        self.assertEqual(op.call_count, 1)
+        self.assertEqual(op.call_args[0][0], "http://x/health")      # /v1 is stripped
+
+    def test_waits_while_the_server_says_loading(self):
+        console = mock.Mock()
+        ok = mock.MagicMock()
+        with mock.patch("agent.llm._urlreq.urlopen", side_effect=[self.http_error(503), self.http_error(503), ok]):
+            self.assertTrue(self.make_llm(NS(), console).wait_ready(poll=0))
+        console.note.assert_called_once()          # told the user once, not on every poll
+        self.assertIn("loading", console.note.call_args[0][0])
+
+    def test_server_without_health_is_assumed_ready(self):
+        with mock.patch("agent.llm._urlreq.urlopen", side_effect=self.http_error(404)):
+            self.assertTrue(self.make_llm(NS()).wait_ready(poll=0))
+
+    def test_gives_up_after_the_timeout(self):
+        console = mock.Mock()
+        with mock.patch("agent.llm._urlreq.urlopen", side_effect=OSError("refused")):
+            self.assertFalse(self.make_llm(NS(), console).wait_ready(timeout=0, poll=0))
+        self.assertIn("gave up", console.note.call_args[0][0])
+
+    def test_pending_request_shows_a_heartbeat(self):
+        import time
+        console = mock.Mock()
+        completions = NS(create=lambda **kw: (time.sleep(0.15), "reply")[1])
+        llm = self.make_llm(NS(chat=NS(completions=completions)), console)
+        llm.HEARTBEAT = 0.02
+        self.assertEqual(llm.chat([{"role": "user", "content": "hi"}]), "reply")
+        self.assertTrue(any("waiting for the model" in c[0][1] for c in console.debug.call_args_list))
 
 
 class DevCopyTest(TmpCase):

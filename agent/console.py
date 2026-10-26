@@ -21,6 +21,10 @@ class Console:
         """Always shown, on stderr: the run did not end well."""
         print(text, file=sys.stderr)
 
+    def note(self, text) -> None:
+        """Always shown, on stderr: progress worth knowing about (e.g. waiting for the model)."""
+        print(text, file=sys.stderr)
+
     def debug(self, depth: int, text) -> None:
         """Shown only with --debug, indented by nesting depth so a worker's steps stand out."""
         if not self.debug_enabled:
