@@ -49,6 +49,14 @@ usage() {
   exit 1
 }
 
+# nvidia-smi lives in /usr/lib/wsl/lib under WSL and is usually not on PATH.
+NVSMI="$(command -v nvidia-smi || true)"
+if [ -z "$NVSMI" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then NVSMI=/usr/lib/wsl/lib/nvidia-smi; fi
+gpu_mib() {   # gpu_mib used|total  ->  MiB, or nothing if there is no GPU tool
+  [ -n "$NVSMI" ] || return 0
+  "$NVSMI" --query-gpu="memory.$1" --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d ' ' || true
+}
+
 # llama-server answers /v1/models while it is still loading; /health is 200 only when ready.
 server_ready() { curl -sf -m 3 "localhost:$PORT/health" >/dev/null 2>&1; }
 
@@ -139,7 +147,7 @@ preflight() {
     *) warn "Hugging Face answered HTTP $code; continuing without checks."; return 0 ;;
   esac
 
-  command -v nvidia-smi >/dev/null && vram="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1 | tr -d ' ')" || true
+  vram="$(gpu_mib total)"
   disk="$(df -B1 --output=avail "$HOME" | tail -n 1 | tr -d ' ')"
   # Under WSL, df shows the size of WSL's virtual disk, not the Windows drive that backs it.
   # That drive filling up is what corrupts WSL, so check C: too and use the smaller number.
@@ -233,6 +241,33 @@ printf '%s\n' "$UNIT" > deploy/llama.service
 systemctl --user daemon-reload
 systemctl --user restart llama
 
+# ---- after loading: is it actually fast, and is there VRAM headroom? (a GPU that is full
+# makes the driver spill into system RAM, which looks like a hung server)
+speed_check() {
+  local used total reply tps
+  echo "Speed check (a short test generation; NO_CHECK=1 skips it) ..."
+  reply="$(curl -s -m 90 "localhost:$PORT/v1/chat/completions" -H 'Content-Type: application/json' \
+           -d '{"messages":[{"role":"user","content":"Count from 1 to 20."}],"max_tokens":48}' || true)"
+  tps="$(printf '%s' "$reply" | python3 -c 'import sys, json
+try: print(round(json.load(sys.stdin)["timings"]["predicted_per_second"], 1))
+except Exception: pass' 2>/dev/null || true)"
+  used="$(gpu_mib used)"; total="$(gpu_mib total)"
+  if [ -z "$tps" ]; then
+    warn "no answer within 90 s: far too slow to be usable. Almost certainly the GPU is out of memory and spilling into system RAM."
+  else
+    echo "      generating at $tps tokens/s"
+  fi
+  if [ -n "$used" ] && [ -n "${total:-}" ]; then
+    echo "      GPU memory: $(awk -v u="$used" -v t="$total" 'BEGIN { printf "%.1f / %.1f GB (%d%%)", u / 1024, t / 1024, u * 100 / t }')"
+    if [ $((used * 100 / total)) -ge 93 ]; then
+      warn "the GPU is over 93% full. Once the agent's context grows it will likely spill into system RAM and crawl. Try: NP=1 CTX=16384 EXTRA=\"-ctk q8_0 -ctv q8_0\" ./model.sh $LABEL"
+    fi
+  fi
+  if [ -n "$tps" ] && awk -v t="$tps" 'BEGIN { exit !(t < 10) }'; then
+    warn "only $tps tokens/s: this model is probably too big for the GPU as configured (see the memory line above)."
+  fi
+}
+
 # ---- progress helpers
 blobs_dir="$HUB/models--${REPO//\//--}/blobs"
 dir_bytes() {   # bytes in the model's download folder (finished and in-progress files)
@@ -243,7 +278,9 @@ dir_bytes() {   # bytes in the model's download folder (finished and in-progress
 downloading() { compgen -G "$HUB/models--*/blobs/*.downloadInProgress" >/dev/null; }
 tty_out=0; [ -t 1 ] && tty_out=1
 show() {        # overwrite one line on a terminal; a plain line otherwise (every 10 s)
-  if [ "$tty_out" = 1 ]; then printf '\r\033[K      %s' "$1"
+  if [ "$tty_out" = 1 ]; then
+    local cols; cols="$(tput cols 2>/dev/null || echo 80)"
+    printf '\r\033[K      %s' "${1:0:$((cols - 8))}"      # never wrap, or the line can't be overwritten
   elif (( ${2:-0} % 5 == 0 )); then echo "      $1"; fi
 }
 endline() { [ "$tty_out" = 1 ] && echo; return 0; }
@@ -254,11 +291,19 @@ NEED_DL=0; [ -z "$CACHED$LOCAL" ] && NEED_DL=1
 if [ "$NEED_DL" = 1 ]; then step 3 "Downloading $LABEL (llama-server fetches it on start)"
 else step 3 "Download: skipped, nothing to fetch"; step 4 "Loading the model into the GPU"; fi
 
+# While loading, GPU memory fills up to roughly the model's file size: that gives a percentage.
+if [ -n "$LOCAL" ]; then model_file="$LOCAL"; else model_file="$CACHED"; fi
+if [ -n "$model_file" ] && [ -f "$model_file" ]; then expect_bytes="$(stat -L -c %s "$model_file")"
+else expect_bytes="$TOTAL_BYTES"; fi
+vram_min=""
+
 base="$(dir_bytes)"; prev=$base; prev_t=$SECONDS; speed=0; phase=$([ "$NEED_DL" = 1 ] && echo dl || echo load)
 t0=$SECONDS; load_t0=$SECONDS
 for ((i = 0; i * 2 < WAIT; i++)); do
   if server_ready; then
-    endline; echo; echo "Ready. The model is loaded and serving."; status; echo
+    endline; echo; echo "Ready. The model is loaded and serving."; status
+    [ -n "${NO_CHECK:-}" ] || speed_check
+    echo
     echo "Tip: start a fresh conversation with the new model:  ./run.sh --new --chat"
     exit 0
   fi
@@ -288,8 +333,14 @@ for ((i = 0; i * 2 < WAIT; i++)); do
     fi
     show "$line" "$i"
   else
-    last="$(journalctl --user -u llama -n 30 -o cat --no-pager 2>/dev/null | grep -E '[A-Za-z]' | tail -n 1 | cut -c1-80 || true)"
-    show "loading... $((SECONDS - load_t0))s  ${last}" "$i"
+    used="$(gpu_mib used)"; total_gpu="$(gpu_mib total)"; line="loading... $((SECONDS - load_t0))s"
+    if [ -n "$used" ] && [ "${expect_bytes:-0}" -gt 0 ]; then
+      if [ -z "$vram_min" ] || [ "$used" -lt "$vram_min" ]; then vram_min=$used; fi   # low point = old model freed
+      line="$line  $(awk -v u="$used" -v m="$vram_min" -v e="$expect_bytes" -v t="${total_gpu:-0}" 'BEGIN {
+          p = (u - m) * 1048576 * 100 / e; if (p > 99) p = 99; if (p < 0) p = 0
+          printf "~%d%%  GPU %.1f / %.1f GB", p, u / 1024, t / 1024 }')"
+    fi
+    show "$line" "$i"
   fi
   sleep 2
 done

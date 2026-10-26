@@ -158,6 +158,11 @@ repo**, or a local file:
 It reports four steps: **[1/4]** check, **[2/4]** restart the server, **[3/4]** download
 (percentage, GB, speed and ETA) and **[4/4]** load the model into the GPU. A model you
 already have is loaded straight from disk, with no network access and no download.
+Loading shows `~N%` (GPU memory filling up toward the model's size) since llama.cpp
+reports no percentage itself. When the model is ready it runs a short **speed check**
+(`NO_CHECK=1` skips it): tokens per second and GPU memory used. It warns if the GPU is over
+93% full or generation is under 10 tokens/s, because a full GPU makes the driver spill into
+system RAM and the server crawls, which looks like a hang.
 
 Before touching the running server it checks that the repo exists, that it contains a GGUF
 (and the quantization you asked for), that the model fits in VRAM, and that the disk (and
