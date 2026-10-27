@@ -48,6 +48,7 @@ calls `finish` or reaches `MAX_STEPS`.
 |------|--------------|
 | `get_time` | current date and time |
 | `run_shell` | run a bash command in the sandbox (default 30 s timeout, max 300 s) |
+| `write_file` | create or overwrite a file in the workspace, or add to it with `append=true`. Much cheaper in tokens than a heredoc in `run_shell`, and big files are written in pieces. Not available with `SANDBOX_MODE=docker` or to read-only workers. |
 | `finish` | end the run; its `answer` is what gets printed, so it holds the actual answer, not a description of the work |
 | `ask_friend` | ask an advisor (only with `--friends`) |
 | `delegate` | hand a task to a worker (only with `--friends`) |
@@ -55,6 +56,41 @@ calls `finish` or reaches `MAX_STEPS`.
 The conversation is saved to `SESSION_FILE` after every step, so the next run
 resumes it. Use `--new` to start over. Every step is also appended to `LOG_FILE`
 as JSON lines.
+
+### Context management
+
+The model can only see `CTX` tokens at once (the window you gave `llama-server`), and every step
+adds to the history. When the history no longer fits, the server either rejects the request or
+cuts the model's reply off mid-way, which shows up as a tool call that "failed to parse". The agent
+therefore keeps the history inside the window:
+
+- It asks the server for the window size (`/props`) and estimates the history's size, learning
+  the real ratio from the server's own token counts. When the history gets within a reply's
+  worth of the window it **compacts** it down to about half.
+- If the server says "too big" anyway, it compacts harder and retries once.
+- Compaction needs no model call. In this order, and only as far as needed: old reasoning is
+  dropped; old tool outputs are cut to their beginning and end; long arguments of old tool calls
+  (such as a whole file that was written) are cut; whole old steps are dropped, oldest first, with
+  one `[context note]` saying so. The system prompt, the current goal and the newest messages
+  are never touched, and a tool call always stays together with its results. Files in the
+  workspace are unaffected, so the model can always look at them again.
+- Each compaction is logged (`compact` events in `LOG_FILE`) and shown with `--debug`:
+  `[context] nearly full: ~3976 -> ~1957 of 4000 tokens (trimmed 2 old tool outputs, dropped 2 old steps)`.
+  If the server has no `/props`, set the window yourself with `CONTEXT_TOKENS`.
+
+If even a compacted history cannot fit, the run stops with a message that says so and what to do
+(`--new`, or a bigger `CTX`), instead of retrying the same request.
+
+### When the model server fails
+
+Failures are told apart, because they need different handling (`--debug` shows which):
+
+| What happened | What the agent does |
+|---|---|
+| the conversation does not fit the window | does not retry; compacts the history and tries once more |
+| a tool call could not be parsed (usually a reply cut off) | if the window was nearly full, treats it as the above; otherwise retries with a hint to write shorter calls (`write_file` in pieces) |
+| the server is unreachable | retries, then stops with `can't reach the model server at <url>` |
+| anything else | retries with a different sample, then stops and shows the server's error |
 
 ## Sandbox
 
@@ -184,6 +220,23 @@ The agent asks the server which model it is serving (`LLM_MODEL=auto`), so nothi
 changes when you switch. Start a new conversation afterwards (`--new`): the saved history
 is in the other model's format.
 
+## Status while it runs
+
+On a terminal, while the agent waits for the model it shows one live line that updates in
+place and is wiped before the answer prints:
+
+```
+main, step 3: waiting for the model... 42s | total 1m 12s
+```
+
+The first number is the current request, `total` is the time since you gave the goal. The
+line is only drawn on a terminal (never into pipes or log files), and `--debug` ends a run
+with `[elapsed] 1m 12s`. If a request stays pending for minutes, the model is generating
+very slowly (usually a full GPU, see `./model.sh`'s speed check) or the server is stuck.
+
+`./model.sh status` shows how long the model server has been up, or says it is running but
+not ready yet.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -196,6 +249,7 @@ is in the other model's format.
 | `SANDBOX` | `agent-sandbox` | docker container name (docker mode only) |
 | `EXPOSE_LLAMA` | `1` | `1` = bridge llama-server into the jail, `0` = no access |
 | `MAX_STEPS` | `25` | max tool calls per goal for the main agent |
+| `CONTEXT_TOKENS` | `0` | the server's context window per request. `0` = ask llama-server (`/props`) and learn it from its errors; set it if your server has no `/props` |
 | `SESSION_FILE` | `session.json` | saved conversation (kept outside the sandbox) |
 | `LOG_FILE` | `agent_run.jsonl` | JSON-lines log of every step |
 | `USE_FRIENDS` | `0` | `1` = same as `--friends` |
@@ -212,17 +266,18 @@ agent/
   helptext.py           the text printed by -h
   app.py                App: wires everything together, runs goals
   agent.py              Agent: the think -> tool -> observe loop
-  tools.py              Tool base class, built-in tools, ToolPool
+  tools.py              Tool base class, built-in tools (incl. write_file), ToolPool
   friends.py            friend config, FriendService, ask_friend / delegate
   sandbox.py            bwrap / docker / none sandboxes, LlamaBridge
-  llm.py                LLM client with retries
+  llm.py                LLM client: retries, failure classification, context window lookup
+  context.py            compact(): keeps the history inside the context window
   console.py            Console: quiet by default, --debug shows every step
   prompts.py            system prompts
   storage.py            EventLog, SessionStore, FriendMemory
   devcopy.py            the model's editable copy (sync / diff)
   config.py             Config dataclass, read from env vars
   util.py               truncate()
-tests/test_agent.py     unit tests
+tests/                  unit tests (test_agent, test_context, test_write_file)
 ```
 
 Created at runtime: `workspace/` (including `workspace/agent_dev/`), `session.json`,

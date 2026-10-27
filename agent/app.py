@@ -1,18 +1,18 @@
 """App: builds all the pieces and runs goals. The only place that knows about everything."""
 from __future__ import annotations
 
-from .agent import FINISHED, MAX_STEPS, Agent, RunResult
+from .agent import CONTEXT_FULL, FINISHED, MAX_STEPS, Agent, RunResult
 from .config import ROOT, Config
 from .console import Console
 from .devcopy import DevCopy
 from .friends import AskFriendTool, DelegateTool, FriendRegistry, FriendService
 from .llm import LLM
-from .prompts import build_system
+from .prompts import build_system, write_file_available
 from .sandbox import make_sandbox
 from .storage import EventLog, FriendMemory, SessionStore
-from .tools import FinishTool, GetTimeTool, RunShellTool, ToolPool
+from .tools import FinishTool, GetTimeTool, RunShellTool, ToolPool, WriteFileTool
 
-MAIN_TOOLS = ("get_time", "run_shell", "ask_friend", "delegate")
+MAIN_TOOLS = ("get_time", "run_shell", "write_file", "ask_friend", "delegate")
 
 
 class App:
@@ -25,12 +25,15 @@ class App:
         self.memory = FriendMemory(cfg.friend_memory_file, cfg.max_friend_history)
         self.devcopy = DevCopy(ROOT, cfg.dev_dir)
         self.sandbox = make_sandbox(cfg)
-        self.llm = llm or LLM(cfg.llm_url, cfg.model, self.log, self.console)
+        self.llm = llm or LLM(cfg.llm_url, cfg.model, self.log, self.console,
+                              n_ctx=cfg.context_tokens or None)
         self.registry = FriendRegistry.load(cfg.friends_file, enabled=cfg.use_friends)
         self.system = build_system(cfg, self.registry)
 
         tools = [GetTimeTool(), RunShellTool(self.sandbox, cfg.default_timeout, cfg.max_timeout),
                  FinishTool()]
+        if write_file_available(cfg):
+            tools.append(WriteFileTool(cfg.workspace))
         self.service = FriendService(cfg, self.registry, self.llm, self.memory, self.log, self.console)
         if self.registry.advisors():
             tools.append(AskFriendTool(self.service))
@@ -71,10 +74,12 @@ class App:
     def run_goal(self, goal: str) -> RunResult:
         """Run one goal and report the outcome. History is kept, so earlier work stays in context."""
         self.messages.append({"role": "user", "content": f"GOAL: {goal}"})
+        self.console.start_clock()
         self.log.log("start", goal=goal, model=self.llm.model_name)
         agent = Agent("main", self.llm, self.pool.select(MAIN_TOOLS, 0), self.cfg.max_steps,
                       self.log, self.console, on_save=lambda: self.sessions.save(self.messages))
         result = agent.run(self.messages)
+        self.console.debug(0, f"[elapsed] {self.console.elapsed()}")
         if not self.cfg.debug:          # with --debug the steps already showed the outcome
             self._report(result)
         return result
@@ -88,8 +93,8 @@ class App:
             msg = f"Stopped: hit the step limit ({self.cfg.max_steps}) without finishing."
             if result.text:
                 msg += f"\nLast message: {result.text}"
-        else:
-            msg = f"Stopped: the model server kept failing; see {self.cfg.log_file}."
+        else:           # LLM_FAILED or CONTEXT_FULL: the text says why and what to do
+            msg = f"Stopped: {result.text or 'the model server kept failing'}.\n(details: {self.cfg.log_file})"
         self.console.error(msg + "\nRun again with --debug to see every step.")
 
     def chat(self) -> None:

@@ -6,19 +6,26 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .console import Console
-from .llm import LLM
+from .context import compact, total_chars
+from .llm import LLM, ContextFull
 from .storage import EventLog
 from .tools import CallContext, Tool
 from .util import truncate
 
-FINISHED, MAX_STEPS, LLM_FAILED = "finished", "max_steps", "llm_failed"
+FINISHED, MAX_STEPS, LLM_FAILED, CONTEXT_FULL = "finished", "max_steps", "llm_failed", "context_full"
+
+# Context management (see context.py). When the history is estimated to come within RESERVE tokens
+# of the window, shrink it to TARGET_PROACTIVE of the window. If the server says it is full anyway,
+# shrink it harder, to TARGET_REACTIVE, and try once more.
+TARGET_PROACTIVE, TARGET_REACTIVE = 0.50, 0.40
+MAX_RESERVE = 4096              # tokens kept free for the model's reply
 
 NUDGE = "You must call a tool. Use one of your tools to act, or finish if done."
 
 
 @dataclass
 class RunResult:
-    status: str         # FINISHED | MAX_STEPS | LLM_FAILED
+    status: str         # FINISHED | MAX_STEPS | LLM_FAILED | CONTEXT_FULL
     text: str = ""      # the finish answer, or the last thing the model said
 
 
@@ -37,6 +44,7 @@ class Agent:
         self.depth = depth
         self.readonly = readonly
         self.on_save = on_save or (lambda: None)
+        self._tokens_per_char = 0.33        # refined from the server's own token counts
 
     @property
     def schemas(self) -> list[dict]:
@@ -49,11 +57,11 @@ class Agent:
 
         for step in range(1, self.max_steps + 1):
             self.console.debug(d, f"\n===== {tag}step {step} =====")
-            resp = self.llm.chat(messages, self.schemas, depth=d, label=self.name, step=step)
-            if resp is None:
-                self.console.debug(d, f"[STOPPED] the model server kept failing; see {self.log.path}")
+            resp = self._ask(messages, step)
+            if isinstance(resp, RunResult):         # could not get an answer: say why
+                self.console.debug(d, f"[STOPPED] {resp.text}; see {self.log.path}")
                 self.on_save()
-                return RunResult(LLM_FAILED)
+                return resp
             msg = resp.choices[0].message
             messages.append(msg.model_dump(exclude_none=True))
 
@@ -84,6 +92,64 @@ class Agent:
         last = next((m.get("content") for m in reversed(messages)
                      if m.get("role") == "assistant" and m.get("content")), "")
         return RunResult(MAX_STEPS, last or "")
+
+    # -- talking to the model, with context management ---------------------------------------
+    def _schema_chars(self) -> int:
+        return len(json.dumps(self.schemas))
+
+    def _ask(self, messages: list, step: int):
+        """One model call. Makes room first when the history is close to the window, and shrinks
+        it and retries once if the server says it does not fit. Returns the response, or a
+        RunResult when the run cannot continue."""
+        for attempt in (1, 2):
+            self._make_room(messages)
+            chars = total_chars(messages, self._schema_chars())
+            try:
+                resp = self.llm.chat(messages, self.schemas, depth=self.depth, label=self.name,
+                                     step=step, raise_context_full=True)
+            except ContextFull as e:
+                n_ctx = e.n_ctx or self.llm.context_size()
+                if attempt == 2 or not n_ctx or not self._compact(messages, int(n_ctx * TARGET_REACTIVE),
+                                                                  n_ctx, "the server said it was full"):
+                    return RunResult(CONTEXT_FULL, self.llm.failure_text())
+                continue
+            if resp is None:
+                return RunResult(LLM_FAILED, self.llm.failure_text())
+            self._calibrate(resp, chars)
+            return resp
+        return RunResult(CONTEXT_FULL, self.llm.failure_text())      # not reached
+
+    def _calibrate(self, resp, sent_chars: int) -> None:
+        """Learn how many tokens a character costs for this model and this kind of text."""
+        prompt_tokens = getattr(getattr(resp, "usage", None), "prompt_tokens", None)
+        if isinstance(prompt_tokens, int) and prompt_tokens > 0 and sent_chars > 0:
+            self._tokens_per_char = min(1.0, max(0.15, prompt_tokens / sent_chars))
+
+    def _make_room(self, messages: list) -> None:
+        n_ctx = self.llm.context_size()
+        if not n_ctx:
+            return
+        estimate = total_chars(messages, self._schema_chars()) * self._tokens_per_char
+        if estimate > n_ctx - min(MAX_RESERVE, n_ctx // 4):
+            self._compact(messages, int(n_ctx * TARGET_PROACTIVE), n_ctx, "nearly full")
+
+    def _compact(self, messages: list, target_tokens: int, n_ctx: int, why: str) -> bool:
+        """Shrink the history to about target_tokens. Returns whether anything was shrunk."""
+        extra = self._schema_chars()
+        report = compact(messages, int(target_tokens / self._tokens_per_char), extra_chars=extra)
+        if not report.changed:
+            return False
+        before, after = (int(c * self._tokens_per_char) for c in (report.before, report.after))
+        what = ", ".join(x for x in (
+            f"trimmed {report.trimmed_outputs} old tool outputs" if report.trimmed_outputs else "",
+            f"trimmed {report.trimmed_calls} long tool calls" if report.trimmed_calls else "",
+            f"dropped {report.dropped_steps} old steps" if report.dropped_steps else "") if x) or "dropped old reasoning"
+        self.console.debug(self.depth, f"[context] {why}: ~{before} -> ~{after} of {n_ctx} tokens ({what})")
+        self.log.log("compact", agent=self.name, reason=why, before_tokens=before, after_tokens=after,
+                     n_ctx=n_ctx, trimmed_outputs=report.trimmed_outputs, trimmed_calls=report.trimmed_calls,
+                     dropped_steps=report.dropped_steps)
+        self.on_save()
+        return True
 
     def _handle(self, call, step: int) -> tuple[str, bool, str]:
         """Run one tool call. Returns (observation, finished?, the finish answer)."""

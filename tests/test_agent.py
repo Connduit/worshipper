@@ -56,14 +56,23 @@ class FakeLLM:
     def wait_ready(self, *a, **k):
         return True
 
-    def __init__(self, *script):
+    def __init__(self, *script, n_ctx=None):
         self.script = list(script)
         self.calls = []
+        self.n_ctx = n_ctx          # the context window the agent should manage; None = unknown
 
-    def chat(self, messages, tools=None, *, depth=0, label="main", step=None):
+    def context_size(self):
+        return self.n_ctx
+
+    def failure_text(self):
+        return "the model server kept failing"
+
+    def chat(self, messages, tools=None, *, depth=0, label="main", step=None, raise_context_full=False):
         self.calls.append({"label": label, "depth": depth, "messages": [dict(m) for m in messages],
                            "tools": [t["function"]["name"] for t in tools] if tools else None})
         item = self.script.pop(0)
+        if isinstance(item, Exception):         # scripted failure, e.g. ContextFull
+            raise item
         return None if item is None else NS(choices=[NS(message=item)])
 
 
@@ -118,7 +127,8 @@ class AgentFlowTest(TmpCase):
         by_label = {}
         for c in llm.calls:
             by_label.setdefault(c["label"], c)
-        self.assertEqual(by_label["main"]["tools"], ["get_time", "run_shell", "ask_friend", "delegate", "finish"])
+        self.assertEqual(by_label["main"]["tools"],
+                         ["get_time", "run_shell", "write_file", "ask_friend", "delegate", "finish"])
         self.assertIsNone(by_label["reviewer"]["tools"])                       # advisors have no tools
         self.assertEqual(by_label["coder"]["tools"], ["run_shell", "get_time", "finish"])
         self.assertEqual(by_label["coder"]["depth"], 1)
@@ -426,14 +436,72 @@ class LLMWaitingTest(TmpCase):
             self.assertFalse(self.make_llm(NS(), console).wait_ready(timeout=0, poll=0))
         self.assertIn("gave up", console.note.call_args[0][0])
 
-    def test_pending_request_shows_a_heartbeat(self):
+    def slow_llm(self, console):
         import time
-        console = mock.Mock()
         completions = NS(create=lambda **kw: (time.sleep(0.15), "reply")[1])
         llm = self.make_llm(NS(chat=NS(completions=completions)), console)
-        llm.HEARTBEAT = 0.02
+        llm.TICK = llm.HEARTBEAT = 0.02
+        return llm
+
+    def test_pending_request_logs_a_heartbeat_when_there_is_no_terminal(self):
+        console = mock.Mock()
+        console.status.return_value = False         # stderr is not a terminal
+        llm = self.slow_llm(console)
         self.assertEqual(llm.chat([{"role": "user", "content": "hi"}]), "reply")
         self.assertTrue(any("waiting for the model" in c[0][1] for c in console.debug.call_args_list))
+
+    def test_pending_request_shows_a_live_timer_on_a_terminal(self):
+        console = mock.Mock()
+        console.status.return_value = True
+        llm = self.slow_llm(console)
+        llm.chat([{"role": "user", "content": "hi"}], label="main", step=3)
+        text = console.status.call_args[0][0]
+        self.assertIn("main, step 3", text)
+        self.assertIn("waiting for the model", text)
+        console.debug.assert_not_called()            # the live line replaces the log lines
+        console.clear_status.assert_called()         # and is wiped when the answer arrives
+
+
+class FakeTTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class ConsoleStatusTest(unittest.TestCase):
+    def test_status_is_not_written_unless_stderr_is_a_terminal(self):
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            self.assertFalse(Console().status("working"))
+        self.assertEqual(err.getvalue(), "")
+
+    def test_status_is_redrawn_in_place_and_wiped_before_other_output(self):
+        err, out = FakeTTY(), io.StringIO()
+        with mock.patch.object(sys, "stderr", err), mock.patch.object(sys, "stdout", out):
+            c = Console()
+            self.assertTrue(c.status("working... 3s"))
+            self.assertIn("\r\x1b[K" + "working... 3s", err.getvalue())
+            before = len(err.getvalue())
+            c.info("the answer")
+            self.assertEqual(err.getvalue()[before:], "\r\x1b[K")   # status wiped first
+            self.assertEqual(out.getvalue(), "the answer\n")
+            c.info("again")                                          # nothing left to wipe
+            self.assertEqual(err.getvalue()[before:], "\r\x1b[K")
+
+    def test_status_includes_the_goal_clock_and_fits_the_terminal(self):
+        err = FakeTTY()
+        with mock.patch.object(sys, "stderr", err), \
+                mock.patch("agent.console.shutil.get_terminal_size", return_value=os.terminal_size((30, 24))):
+            c = Console()
+            c.start_clock()
+            c.status("x" * 80)
+        drawn = err.getvalue().replace("\r\x1b[K", "")
+        self.assertLessEqual(len(drawn), 29)
+
+    def test_total_clock_text(self):
+        c = Console()
+        self.assertEqual(c.elapsed(), "")
+        c.start_clock()
+        self.assertTrue(c.elapsed().endswith("s"))
 
 
 class DevCopyTest(TmpCase):

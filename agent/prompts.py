@@ -18,6 +18,11 @@ Never reply with plain text only; always call a tool.
 Your working directory is /workspace. Prefer small targeted edits (sed -i, or a short
 python patch script) over rewriting whole files."""
 
+WRITE_FILE = """
+To create or overwrite a file use the write_file tool, not a heredoc in run_shell: it needs far
+fewer tokens. Write big files in pieces of about 100 lines (the first call creates the file,
+later calls use append=true), because a reply that gets too long is cut off and lost."""
+
 
 def friends_section(registry: "FriendRegistry", max_depth: int) -> str:
     """Paragraph telling the main agent who its friends are."""
@@ -60,8 +65,14 @@ and verify every change before calling finish:
 Report what you changed and what the tests showed."""
 
 
+def write_file_available(cfg: Config) -> bool:
+    """write_file writes on the host, so it only makes sense when the workspace is the one the
+    commands see (bwrap binds it; "none" runs inside it). Not for a docker container."""
+    return cfg.sandbox_mode != "docker"
+
+
 def build_system(cfg: Config, registry: "FriendRegistry") -> str:
-    s = BASE + friends_section(registry, cfg.max_depth)
+    s = BASE + (WRITE_FILE if write_file_available(cfg) else "") + friends_section(registry, cfg.max_depth)
     if cfg.sandbox_mode == "bwrap" and cfg.expose_llama:
         s += dev_section(cfg)
     return s

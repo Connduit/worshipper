@@ -29,6 +29,7 @@ class Config:
     default_timeout: int = 30
     max_timeout: int = 300
     max_friend_history: int = 12    # messages kept per advisor (even, so pairs stay intact)
+    context_tokens: int = 0         # the server's context window; 0 = ask llama-server (/props)
 
     @property
     def friend_memory_file(self) -> str:
@@ -58,4 +59,5 @@ class Config:
             friends_file=env.get("FRIENDS_FILE", "friends.json"),
             max_depth=int(env.get("MAX_DEPTH", "1")),
             debug=env.get("DEBUG", "0") == "1",
+            context_tokens=int(env.get("CONTEXT_TOKENS", "0")),
         )
