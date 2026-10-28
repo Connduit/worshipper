@@ -294,3 +294,24 @@ python -m unittest discover -s tests -q
 ```
 
 They use a fake LLM, so they need no llama-server, bwrap or `openai` package.
+
+### Longer context and persistent project memory
+
+For GPT-OSS 20B, `./model.sh gptoss` now defaults to one parallel slot and a
+32,768-token context. To try 64K with quantized KV cache:
+
+```bash
+NP=1 CTX=65536 EXTRA="-ctk q8_0 -ctv q8_0" ./model.sh gptoss
+```
+
+Actual supported context and speed depend on your GPU, model, and llama.cpp
+version. `agent/context.py` still trims oversized old tool outputs; when it
+must remove old message units, `ProjectMemory` archives them in
+`<session_file>.archive.jsonl` and stores bounded historical excerpts in
+`<session_file>.memory.json`. The excerpts are injected into subsequent goals
+as a project-memory note. These are **heuristic excerpts, not AI-generated
+summaries**; check workspace files for authoritative current state. Both files
+are local and may contain sensitive prompts/tool results: protect them like
+session files. Starting a new session deletes the associated memory/archive.
+The archive is not automatically searched; it is available for future retrieval
+features. Tool-call JSON errors are a separate issue from context exhaustion.

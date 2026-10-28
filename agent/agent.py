@@ -34,7 +34,8 @@ class Agent:
 
     def __init__(self, name: str, llm: LLM, tools: list[Tool], max_steps: int, log: EventLog,
                  console: Console, *, depth: int = 0, readonly: bool = False,
-                 on_save: Callable[[], None] | None = None):
+                 on_save: Callable[[], None] | None = None,
+                 on_drop: Callable[[list[dict]], None] | None = None):
         self.name = name
         self.llm = llm
         self.tools = {t.name: t for t in tools}
@@ -44,6 +45,7 @@ class Agent:
         self.depth = depth
         self.readonly = readonly
         self.on_save = on_save or (lambda: None)
+        self.on_drop = on_drop
         self._tokens_per_char = 0.33        # refined from the server's own token counts
 
     @property
@@ -136,7 +138,7 @@ class Agent:
     def _compact(self, messages: list, target_tokens: int, n_ctx: int, why: str) -> bool:
         """Shrink the history to about target_tokens. Returns whether anything was shrunk."""
         extra = self._schema_chars()
-        report = compact(messages, int(target_tokens / self._tokens_per_char), extra_chars=extra)
+        report = compact(messages, int(target_tokens / self._tokens_per_char), extra_chars=extra, on_drop=self.on_drop)
         if not report.changed:
             return False
         before, after = (int(c * self._tokens_per_char) for c in (report.before, report.after))

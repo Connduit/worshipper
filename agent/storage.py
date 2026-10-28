@@ -39,6 +39,64 @@ class SessionStore:
             os.remove(self.path)
 
 
+class ProjectMemory:
+    """Bounded, persistent record of user goals and significant agent outcomes.
+
+    Stores excerpts rather than pretending a deterministic heuristic is an LLM summary.
+    Full discarded messages are also archived as JSONL for later inspection.
+    """
+
+    def __init__(self, session_path: str, max_chars: int = 9000):
+        self.path = session_path + ".memory.json"
+        self.archive_path = session_path + ".archive.jsonl"
+        self.max_chars = max_chars
+
+    def delete(self) -> None:
+        for path in (self.path, self.archive_path):
+            if os.path.exists(path):
+                os.remove(path)
+
+    def read(self) -> str:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                value = json.load(f)
+            return value if isinstance(value, str) else ""
+        except (OSError, ValueError):
+            return ""
+
+    def remember(self, removed: list[dict]) -> None:
+        if not removed:
+            return
+        with open(self.archive_path, "a", encoding="utf-8") as f:
+            for message in removed:
+                f.write(json.dumps(message, ensure_ascii=False) + "\n")
+        excerpts = []
+        for message in removed:
+            role, content = message.get("role"), message.get("content")
+            if role == "user" and isinstance(content, str) and not content.startswith("[context note]"):
+                excerpts.append("User request: " + content[:1100])
+            elif role == "assistant" and isinstance(content, str) and content.strip():
+                excerpts.append("Agent response: " + content[:500])
+            elif role == "assistant":
+                for call in message.get("tool_calls") or []:
+                    fn = call.get("function") or {}
+                    if fn.get("name") == "write_file":
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                            excerpts.append("Wrote file: " + str(args.get("path", "unknown"))[:250])
+                        except (ValueError, TypeError):
+                            pass
+        if not excerpts:
+            return
+        merged = (self.read() + "\n" + "\n".join(excerpts)).strip()
+        # Keep newest information, including the most recent decisions.
+        merged = merged[-self.max_chars:]
+        temp = self.path + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False)
+        os.replace(temp, self.path)
+
+
 class FriendMemory:
     """Each advisor's persistent conversation with the agent, trimmed to `max_history`."""
 

@@ -9,7 +9,7 @@ from .friends import AskFriendTool, DelegateTool, FriendRegistry, FriendService
 from .llm import LLM
 from .prompts import build_system, write_file_available
 from .sandbox import make_sandbox
-from .storage import EventLog, FriendMemory, SessionStore
+from .storage import EventLog, FriendMemory, SessionStore, ProjectMemory
 from .tools import FinishTool, GetTimeTool, RunShellTool, ToolPool, WriteFileTool
 
 MAIN_TOOLS = ("get_time", "run_shell", "write_file", "ask_friend", "delegate")
@@ -22,6 +22,7 @@ class App:
         self.console = Console(cfg.debug)
         self.log = EventLog(cfg.log_file)
         self.sessions = SessionStore(cfg.session_file)
+        self.project_memory = ProjectMemory(str(cfg.session_file))
         self.memory = FriendMemory(cfg.friend_memory_file, cfg.max_friend_history)
         self.devcopy = DevCopy(ROOT, cfg.dev_dir)
         self.sandbox = make_sandbox(cfg)
@@ -48,6 +49,7 @@ class App:
         """Prepare the sandbox and load (or reset) the saved conversation."""
         if new:                                     # start a fresh conversation
             self.sessions.delete()
+            self.project_memory.delete()
             self.memory.delete()
         if self.cfg.sandbox_mode == "bwrap":
             action = self.devcopy.sync(force=sync)
@@ -64,6 +66,7 @@ class App:
         self.messages = self.sessions.load(self.system)
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = self.system   # resumed sessions see the current setup (e.g. --friends)
+        self._inject_project_memory()
         self.console.debug(0, f"[session] {len(self.messages) - 1} earlier messages loaded"
                            if len(self.messages) > 1 else "[session] new conversation")
         self.llm.wait_ready()
@@ -71,13 +74,25 @@ class App:
         if self.registry:
             self.console.debug(0, f"[friends] {', '.join(self.registry.names())}")
 
+    def _inject_project_memory(self) -> None:
+        """Refresh a single system note; never accumulate duplicate memory notes."""
+        prefix = "[persistent project memory]"
+        self.messages[:] = [m for m in self.messages if not
+                            (m.get("role") == "system" and str(m.get("content", "")).startswith(prefix))]
+        saved = self.project_memory.read()
+        if saved:
+            self.messages.insert(1, {"role": "system", "content": prefix +
+                                   "\nHistorical excerpts (verify against files before acting):\n" + saved})
+
     def run_goal(self, goal: str) -> RunResult:
         """Run one goal and report the outcome. History is kept, so earlier work stays in context."""
+        self._inject_project_memory()
         self.messages.append({"role": "user", "content": f"GOAL: {goal}"})
         self.console.start_clock()
         self.log.log("start", goal=goal, model=self.llm.model_name)
         agent = Agent("main", self.llm, self.pool.select(MAIN_TOOLS, 0), self.cfg.max_steps,
-                      self.log, self.console, on_save=lambda: self.sessions.save(self.messages))
+                      self.log, self.console, on_save=lambda: self.sessions.save(self.messages),
+                      on_drop=self.project_memory.remember)
         result = agent.run(self.messages)
         self.console.debug(0, f"[elapsed] {self.console.elapsed()}")
         if not self.cfg.debug:          # with --debug the steps already showed the outcome

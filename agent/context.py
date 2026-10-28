@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Callable
 
 KEEP_RECENT = 6                 # the newest messages are never touched
 LAST_RESORT_KEEP = 2            # ...except, if nothing else is enough, all but the newest step
@@ -96,10 +97,13 @@ def _units(messages: list, start: int) -> list[tuple[int, int]]:
 
 
 def compact(messages: list, target_chars: int, *, extra_chars: int = 0,
-            keep_recent: int = KEEP_RECENT) -> Report:
+            keep_recent: int = KEEP_RECENT,
+            on_drop: Callable[[list[dict]], None] | None = None) -> Report:
     """Shrink `messages` in place until total_chars(messages, extra_chars) <= target_chars,
     or until there is nothing left that may be shrunk."""
-    start = 1 if messages and messages[0].get("role") == "system" else 0
+    start = 0
+    while start < len(messages) and messages[start].get("role") == "system":
+        start += 1
     report = Report(before=total_chars(messages, extra_chars))
 
     def size() -> int:
@@ -160,6 +164,8 @@ def compact(messages: list, target_chars: int, *, extra_chars: int = 0,
         dropped.append((s, e))
         freed += sum(message_chars(m) for m in messages[s:e])
     if dropped:
+        if on_drop is not None:
+            on_drop([dict(m) for s, e in dropped for m in messages[s:e]])
         gone = {i for s, e in dropped for i in range(s, e)}
         is_note = lambda m: m.get("role") == "user" and str(m.get("content", "")).startswith(NOTE_PREFIX)
         old_notes = [i for i, m in enumerate(messages) if is_note(m)]
@@ -176,7 +182,7 @@ def compact(messages: list, target_chars: int, *, extra_chars: int = 0,
     if size() > target_chars and keep_recent > LAST_RESORT_KEEP:
         # Still too big: the "recent" messages themselves are what is bulky (a small window).
         # Protect only the newest step this time.
-        again = compact(messages, target_chars, extra_chars=extra_chars, keep_recent=LAST_RESORT_KEEP)
+        again = compact(messages, target_chars, extra_chars=extra_chars, keep_recent=LAST_RESORT_KEEP, on_drop=on_drop)
         report.trimmed_outputs += again.trimmed_outputs
         report.trimmed_calls += again.trimmed_calls
         report.dropped_steps += again.dropped_steps

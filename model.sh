@@ -18,7 +18,7 @@
 #
 # Environment overrides:
 #   CTX    context per slot (default depends on the model)
-#   NP     parallel slots, default 2 (the agent and the model's own test runs share the
+#   NP     parallel slots, default 1 (the agent and the model's own test runs share the
 #          server, see README_NEW.md). The server gets CTX x NP tokens in total.
 #   EXTRA  extra llama-server flags, e.g. EXTRA="-ctk q8_0 -ctv q8_0"
 #   FORCE=1       go ahead even if the checks below fail
@@ -33,7 +33,7 @@ cd "$(dirname "$0")"
 
 LLAMA="${LLAMA_SERVER:-$HOME/repos/llama.cpp/build/bin/llama-server}"
 PORT="${LLAMA_PORT:-8080}"
-NP="${NP:-2}"
+NP="${NP:-1}"
 WAIT="${WAIT:-3600}"
 HF="${HF_ENDPOINT:-https://huggingface.co}"
 ENV_FILE="$HOME/.config/llama-server.env"
@@ -83,7 +83,7 @@ case "${1:-}" in
   "")          usage ;;
   status)      status; exit 0 ;;
   list)        list_models; exit 0 ;;
-  gptoss)      SPEC="ggml-org/gpt-oss-20b-GGUF"; DEF_CTX=16384 ;;
+  gptoss)      SPEC="ggml-org/gpt-oss-20b-GGUF"; DEF_CTX=32768 ;;
   qwen-coder)  # ~18.6 GB at Q4_K_M; this context keeps it inside 24 GB of VRAM
                SPEC="unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M"; DEF_CTX=12288 ;;
   *.gguf)      [ -f "$1" ] || die "file not found: $1"; LOCAL="$(realpath "$1")" ;;
