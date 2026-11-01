@@ -67,8 +67,8 @@ class FakeLLM:
     def failure_text(self):
         return "the model server kept failing"
 
-    def chat(self, messages, tools=None, *, depth=0, label="main", step=None, raise_context_full=False):
-        self.calls.append({"label": label, "depth": depth, "messages": [dict(m) for m in messages],
+    def chat(self, messages, tools=None, *, depth=0, label="main", step=None, raise_context_full=False, doing=""):
+        self.calls.append({"label": label, "depth": depth, "doing": doing, "messages": [dict(m) for m in messages],
                            "tools": [t["function"]["name"] for t in tools] if tools else None})
         item = self.script.pop(0)
         if isinstance(item, Exception):         # scripted failure, e.g. ContextFull

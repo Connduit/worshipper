@@ -57,6 +57,25 @@ The conversation is saved to `SESSION_FILE` after every step, so the next run
 resumes it. Use `--new` to start over. Every step is also appended to `LOG_FILE`
 as JSON lines.
 
+### Picking a conversation back up
+
+When you resume a saved conversation with `--chat`, you first see a reminder of where you left
+off: how long ago you last used it, how many goals it has, and the last three, each with what
+the agent answered (or that the run was interrupted):
+
+```
+Resuming your previous conversation (last used 3h 25m ago, 4 goals so far). The last 3:
+  2. you:   add a search box that filters the parts as I type
+     agent: Added the search box; it filters by name and category. Tested by hand wit...
+  3. you:   now split the javascript into src/main.js and keep index.html small. writ...
+     agent: Split it into index.html + src/main.js and a short README.
+  4. you:   make the filters remember their state when the page reloads
+     agent: (no final answer: that run was interrupted or stopped early)
+```
+
+It is built from the saved history (nothing extra is stored), shown once, and not shown for
+`--new`. A one-shot goal (`./run.sh "..."`) stays quiet unless you pass `--debug`.
+
 ### Context management
 
 The model can only see `CTX` tokens at once (the window you gave `llama-server`), and every step
@@ -161,19 +180,59 @@ Invalid entries are skipped with a warning.
 ## Letting the model improve the agent
 
 On first run in bwrap mode, `agent_local.py`, `agent/` and `tests/` are copied to
-`workspace/agent_dev/`. If you ask the agent to improve itself, it edits **that copy**
-and never the code that builds the jail. It is told to verify every change with
-`compileall`, the unit tests, and a real end-to-end run (with `--debug`) before finishing.
+`workspace/agent_dev/`. If you ask the agent to improve itself, it edits **that copy** and never
+the real code. It is told to verify every change with `compileall`, the unit tests, and a real
+end-to-end run (with `--debug`), and then to call `promote_changes`. What that does depends on
+`SELF_IMPROVE`:
 
-You review and promote its work by hand:
+| `SELF_IMPROVE` | what `promote_changes` does |
+|---|---|
+| `off` | the tool does not exist |
+| `queue` (default) | applies nothing; lists what is waiting. You apply it with `--promote` |
+| `auto` | applies the changes that pass the gate below, from the next start; queues the rest |
+
+**Why there is a gate.** Promoted code runs on your machine, *outside* the sandbox, from the next
+start on. So promotion is not a copy. A change is promoted automatically only if all of this holds:
+
+1. **The file is not protected.** `agent_local.py`, `agent/{__init__,cli,app,config,sandbox,tools,devcopy,
+   selfimprove,selftools,hostcontrol}.py` define the jail, the host-side tools, this gate and the wiring.
+   The model never changes them without you (`--promote`).
+2. **No new risky capability.** A static check compares old and new code and refuses a change that
+   *adds* `subprocess`/`socket`/`ctypes`/`importlib`/`pickle`/`shutil`/`urllib`..., `os.system`/`popen`/`exec*`,
+   `os.environ`, `eval`/`exec`/`open`/`__import__`, or class-hierarchy tricks (`__subclasses__`...). Existing
+   uses are fine, only additions count. This is a heuristic against accidents and blunt misuse, **not** a
+   security boundary against a determined model; the boundary is rules 1, 3 and 4.
+3. **Compile and tests pass in the dev copy, inside the jail.**
+4. **After copying, the tests and `-h` pass on the new real code, again inside the jail** (the real tree
+   is shown to the jail read-only), so new code is never run outside the jail before it has passed there.
+
+Also: a backup of every replaced file is kept before anything changes; if step 4 fails (or the check
+times out or crashes) the old files are restored and that exact change is remembered as rejected, so the
+model cannot retry it in a loop; more than 12 files at once, deletions and files that do not parse always
+wait for you; at most 3 promotions per run. Everything is logged to `.selfimprove/log.jsonl` with the diff.
 
 ```bash
-python agent_local.py --diff                                # read the changes
-cp -r workspace/agent_dev/{agent,tests,agent_local.py} .    # only after reading the diff
-python agent_local.py --sync                                # reset the dev copy from the host code
+python agent_local.py --verify      # run the jail checks on the current code, change nothing (do this before auto)
+python agent_local.py --diff        # raw diff of host code vs the dev copy
+python agent_local.py --promote     # review the diff and verdicts, say yes, it verifies in the jail and applies
+python agent_local.py --rollback    # undo the last promotion (automatic or not)
+python agent_local.py --sync        # reset the dev copy from the host code
+python -m agent.selfimprove status|rollback   # the same rollback, even if the rest of the code is broken
 ```
 
-`--sync` wipes `workspace/agent_dev/` and recopies it.
+`--promote`, `--rollback` and `--verify` need `SANDBOX_MODE=bwrap`. `--sync` wipes `workspace/agent_dev/`.
+
+### Letting the model tune the server
+
+With `TUNE_SERVER=1` the model also gets `server_status` and `tune_server`. They are the only door
+from the jail to the host, and a narrow one: `tune_server` can change exactly the context window per
+slot (4096-65536), the parallel slots (1-4) and the KV cache precision (`f16`/`q8_0`/`q4_0`) of the
+*current* model, by calling `./model.sh`. Values are validated numbers and a fixed list, never free
+text, so nothing the model writes reaches a command line. `model.sh` runs in `STRICT` mode: after the
+restart it generates a few tokens and checks GPU memory, and if the server is slow or the GPU is over
+93% full the previous settings are **restored automatically** and the model is told. At most 3 changes
+per run; every attempt is logged to `.selfimprove/tune.jsonl`. The prompt tells the model to use it
+when it keeps running out of context, and to look at `server_status` first.
 
 ## Switching models
 
@@ -206,6 +265,8 @@ the Windows C: drive under WSL) has room. If a check fails it stops and your cur
 keeps running; `FORCE=1` overrides. `DRY_RUN=1` runs the checks and prints the service
 file without changing anything. `WAIT=<seconds>` extends the 1 hour default.
 
+`STRICT=1 ./model.sh ...` exits with status 4 when the speed check warns (used by `tune_server`).
+
 "Ready" means `/health` answers 200. (`/v1/models` answers while the model is still
 loading, so it is not a readiness check.) The agent does the same: at startup it waits for
 `/health` and says so on stderr, and with `--debug` it prints `[waiting for the model... Ns]`
@@ -222,20 +283,42 @@ is in the other model's format.
 
 ## Status while it runs
 
-On a terminal, while the agent waits for the model it shows one live line that updates in
-place and is wiped before the answer prints:
+On a terminal, while the agent waits for the model or for a command, it shows one live line that
+updates in place and is wiped before the answer prints. It says what the step is for:
 
 ```
-main, step 3: waiting for the model... 42s | total 1m 12s
+main, step 1: starting on "make me a bmw part picker page", waiting for the model... 7s | total 7s
+main, step 3: reacting to `npm test` (exit 1), waiting for the model... 42s | total 1m 12s
+main, step 4: running `npm test`... 8s | total 1m 20s
+main, step 5: retry 2/3 after a cut-off tool call, reacting to write_file src/main.js, waiting for the model... 3s
 ```
 
-The first number is the current request, `total` is the time since you gave the goal. The
-line is only drawn on a terminal (never into pipes or log files), and `--debug` ends a run
-with `[elapsed] 1m 12s`. If a request stays pending for minutes, the model is generating
-very slowly (usually a full GPU, see `./model.sh`'s speed check) or the server is stuck.
+The first time is the current wait, `total` is the time since you gave the goal. "Reacting to"
+is the last action and how it went (exit code, failed, timed out): the model's own plan is not
+known until it answers. The line is only drawn on a terminal (never into pipes or log files),
+and `--debug` ends a run with `[elapsed] 1m 12s`. If a request stays pending for minutes, the
+model is generating very slowly (usually a full GPU, see `./model.sh`'s speed check) or the
+server is stuck.
 
 `./model.sh status` shows how long the model server has been up, or says it is running but
 not ready yet.
+
+### Queueing messages while it works
+
+In `--chat` you do not have to wait for the prompt. While a goal runs, keep typing: what you
+type appears at the end of the status line, Enter queues it, and the queued goals run one after
+another as soon as the current one is done (the prompt comes back only when the queue is empty).
+
+```
+main, step 3: running `npm test`... 8s | total 1m 20s | 1 queued | > then add a test for th_
+[queued 2] then add a test for the search box
+```
+
+`/queue` lists what is waiting and `/drop` clears it (both also work at the prompt). Typing
+`exit` while it works queues an exit, so it finishes what is queued first. A half-typed line is
+kept and offered at the next prompt. Up to 20 messages can wait. This needs a terminal: with
+piped input (`printf 'a\nb\n' | ./run.sh --chat`) goals simply run one after the other as before.
+While it works the terminal is in no-echo mode (Ctrl-C still works) and is restored afterwards.
 
 ## Environment variables
 
@@ -249,6 +332,8 @@ not ready yet.
 | `SANDBOX` | `agent-sandbox` | docker container name (docker mode only) |
 | `EXPOSE_LLAMA` | `1` | `1` = bridge llama-server into the jail, `0` = no access |
 | `MAX_STEPS` | `25` | max tool calls per goal for the main agent |
+| `SELF_IMPROVE` | `queue` | `off`, `queue` or `auto`: what happens to the model's changes to its own code (see above) |
+| `TUNE_SERVER` | `0` | `1` = the model may tune the server's context window, slots and KV cache (bounded, with automatic undo) |
 | `CONTEXT_TOKENS` | `0` | the server's context window per request. `0` = ask llama-server (`/props`) and learn it from its errors; set it if your server has no `/props` |
 | `SESSION_FILE` | `session.json` | saved conversation (kept outside the sandbox) |
 | `LOG_FILE` | `agent_run.jsonl` | JSON-lines log of every step |
@@ -271,13 +356,20 @@ agent/
   sandbox.py            bwrap / docker / none sandboxes, LlamaBridge
   llm.py                LLM client: retries, failure classification, context window lookup
   context.py            compact(): keeps the history inside the context window
-  console.py            Console: quiet by default, --debug shows every step
+  console.py            Console: quiet by default, --debug shows every step; live status line, working()
+  stepinfo.py           a few words on what a step is doing, for the status line
+  recap.py              the reminder shown when a saved conversation is resumed
+  inbox.py              queued messages typed while the agent works
+  selfimprove.py        PROTECTED. The promotion gate: checks, backup, rollback (stdlib only)
+  hostcontrol.py        PROTECTED. Bounded server tuning with automatic undo (stdlib only)
+  selftools.py          PROTECTED. promote_changes, server_status, tune_server
   prompts.py            system prompts
   storage.py            EventLog, SessionStore, FriendMemory
   devcopy.py            the model's editable copy (sync / diff)
   config.py             Config dataclass, read from env vars
   util.py               truncate()
-tests/                  unit tests (test_agent, test_context, test_write_file)
+tests/                  unit tests (test_agent, test_context, test_write_file, test_stepinfo, test_recap,
+                        test_inbox, test_selfimprove, test_hostcontrol)
 ```
 
 Created at runtime: `workspace/` (including `workspace/agent_dev/`), `session.json`,

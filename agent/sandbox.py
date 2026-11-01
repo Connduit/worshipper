@@ -25,21 +25,25 @@ class Sandbox(ABC):
         """Set up anything needed before the first command (default: nothing)."""
 
     @abstractmethod
-    def command(self, command: str, readonly: bool = False) -> list[str]:
+    def command(self, command: str, readonly: bool = False,
+                ro_extra: tuple[tuple[str, str], ...] = ()) -> list[str]:
         """argv that runs `command` inside the sandbox.
 
         readonly=True asks for /workspace to be read-only (only BwrapSandbox enforces it).
+        ro_extra is (host path, path in the jail) pairs to show read-only, e.g. the real code,
+        so that new code can be tested in the jail before it is ever run outside it.
         """
 
-    def run(self, command: str, timeout: int, readonly: bool = False) -> subprocess.CompletedProcess:
-        return subprocess.run(self.command(command, readonly),
+    def run(self, command: str, timeout: int, readonly: bool = False,
+            ro_extra: tuple[tuple[str, str], ...] = ()) -> subprocess.CompletedProcess:
+        return subprocess.run(self.command(command, readonly, ro_extra),
                               capture_output=True, text=True, timeout=timeout)
 
 
 class NoSandbox(Sandbox):
     """We're already inside the jail (dev/test role), so run commands directly."""
 
-    def command(self, command: str, readonly: bool = False) -> list[str]:
+    def command(self, command: str, readonly: bool = False, ro_extra=()) -> list[str]:
         return ["bash", "-c", command]
 
 
@@ -47,7 +51,7 @@ class DockerSandbox(Sandbox):
     def __init__(self, container: str):
         self.container = container
 
-    def command(self, command: str, readonly: bool = False) -> list[str]:
+    def command(self, command: str, readonly: bool = False, ro_extra=()) -> list[str]:
         return ["docker", "exec", self.container, "bash", "-lc", command]
 
 
@@ -90,7 +94,8 @@ class BwrapSandbox(Sandbox):
         if self.bridge:
             self.bridge.start()
 
-    def command(self, command: str, readonly: bool = False) -> list[str]:
+    def command(self, command: str, readonly: bool = False,
+                ro_extra: tuple[tuple[str, str], ...] = ()) -> list[str]:
         extra: list[str] = []
         if self.bridge and self.bridge.sock_dir:
             # Only the socket dir is exposed. Inside, socat re-listens on loopback:PORT.
@@ -116,6 +121,7 @@ class BwrapSandbox(Sandbox):
             "--tmpfs", "/tmp",
             "--ro-bind" if readonly else "--bind", self.workspace, "/workspace",
             *extra,
+            *(arg for src, dst in ro_extra for arg in ("--ro-bind", src, dst)),
             "--chdir", "/workspace",
             "--setenv", "HOME", "/workspace",
             "--unshare-all",

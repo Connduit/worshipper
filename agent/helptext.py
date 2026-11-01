@@ -21,6 +21,10 @@ options:
   --sync           Reset the model's dev copy (workspace/agent_dev/) from the host
                    code, discarding its edits. bwrap mode only.
   --diff           Show host code vs. the model's dev copy, then exit.
+  --promote        Review the model's dev-copy changes (diff + verdicts); on your yes,
+                   verify them in the jail and apply them. bwrap mode only.
+  --rollback       Undo the last promotion (automatic or not).
+  --verify         Check that the jail checks behind promotion pass on the current code.
 
 examples:
   python agent_local.py "list the files in /workspace and summarize them"
@@ -28,6 +32,7 @@ examples:
   python agent_local.py --new --chat
   python agent_local.py --friends "add a --version flag, have the reviewer check it"
   python agent_local.py --diff
+  python agent_local.py --promote
 
 More (setup, sandbox, friends, environment variables): see README.md
 """

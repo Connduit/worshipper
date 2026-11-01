@@ -8,6 +8,7 @@ from typing import Mapping
 
 ROOT = Path(__file__).resolve().parent.parent   # the directory holding agent_local.py
 DEV_NAME = "agent_dev"                          # the model's copy lives in <workspace>/agent_dev/
+SELF_IMPROVE_MODES = ("off", "queue", "auto")
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,8 @@ class Config:
     max_timeout: int = 300
     max_friend_history: int = 12    # messages kept per advisor (even, so pairs stay intact)
     context_tokens: int = 0         # the server's context window; 0 = ask llama-server (/props)
+    self_improve: str = "queue"     # off | queue | auto: what happens to the model's own code changes
+    tune_server: bool = False       # let the model change the server's context window etc. (bounded)
 
     @property
     def friend_memory_file(self) -> str:
@@ -44,6 +47,9 @@ class Config:
         env = os.environ if env is None else env
         port = int(env.get("LLAMA_PORT", "8080"))
         workspace = env.get("WORKSPACE", str(ROOT / "workspace"))
+        self_improve = env.get("SELF_IMPROVE", "queue").strip().lower()
+        if self_improve not in SELF_IMPROVE_MODES:
+            raise ValueError(f"SELF_IMPROVE must be one of {', '.join(SELF_IMPROVE_MODES)}, not {self_improve!r}")
         return cls(
             llama_port=port,
             llm_url=env.get("LLM_URL", f"http://127.0.0.1:{port}/v1"),
@@ -60,4 +66,6 @@ class Config:
             max_depth=int(env.get("MAX_DEPTH", "1")),
             debug=env.get("DEBUG", "0") == "1",
             context_tokens=int(env.get("CONTEXT_TOKENS", "0")),
+            self_improve=self_improve,
+            tune_server=env.get("TUNE_SERVER", "0") == "1",
         )

@@ -1,13 +1,15 @@
 """The agent loop: ask the model, run the tool it picked, show it the result, repeat."""
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
 from typing import Callable
 
-from .console import Console
+from .console import Console, working
 from .context import compact, total_chars
 from .llm import LLM, ContextFull
+from .stepinfo import reacting_to, running
 from .storage import EventLog
 from .tools import CallContext, Tool
 from .util import truncate
@@ -106,7 +108,7 @@ class Agent:
             chars = total_chars(messages, self._schema_chars())
             try:
                 resp = self.llm.chat(messages, self.schemas, depth=self.depth, label=self.name,
-                                     step=step, raise_context_full=True)
+                                     step=step, raise_context_full=True, doing=reacting_to(messages))
             except ContextFull as e:
                 n_ctx = e.n_ctx or self.llm.context_size()
                 if attempt == 2 or not n_ctx or not self._compact(messages, int(n_ctx * TARGET_REACTIVE),
@@ -174,21 +176,27 @@ class Agent:
                     self.console.debug(self.depth, f"\n[DONE] {answer}")
                     self.log.log("finish", agent=self.name, depth=self.depth, step=step, answer=answer)
                     done = True
-                    observation = self._run_tool(tool, args)
+                    observation = self._run_tool(tool, args, step)
                 else:       # an empty finish would leave the user with nothing; make the model retry
                     observation = ("ERROR: finish needs a non-empty `answer`. Put the actual answer "
                                    "or result in it, not a description of what you did.")
             else:
                 self.console.debug(self.depth, f"[act] {name}({args})")
-                observation = self._run_tool(tool, args)
+                observation = self._run_tool(tool, args, step)
 
         self.log.log("step", agent=self.name, depth=self.depth, step=step,
                      tool=name, args=args, observation=observation)
         return observation, done, answer
 
-    def _run_tool(self, tool: Tool, args: dict) -> str:
+    def _run_tool(self, tool: Tool, args: dict, step: int | None = None) -> str:
+        # A long command shows what it is and a live timer. Tools that start nested agents do not:
+        # the nested agent shows its own status, and two timers would fight over the one line.
+        where = self.name if step is None else f"{self.name}, step {step}"
+        timer = (contextlib.nullcontext() if tool.delegating else
+                 working(self.console, f"{where}: {running(tool.name, args)}...", self.depth))
         try:
-            return tool.run(args, CallContext(self.depth, self.readonly, self.name))
+            with timer:
+                return tool.run(args, CallContext(self.depth, self.readonly, self.name))
         except KeyError as e:
             return f"ERROR: missing argument {e}"
         except Exception as e:

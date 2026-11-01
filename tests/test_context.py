@@ -164,8 +164,9 @@ class ScriptedLLM:
     def failure_text(self):
         return self.failure
 
-    def chat(self, messages, tools=None, *, depth=0, label="main", step=None, raise_context_full=False):
+    def chat(self, messages, tools=None, *, depth=0, label="main", step=None, raise_context_full=False, doing=""):
         self.calls.append(json.loads(json.dumps(messages)))
+        self.doing = doing
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item

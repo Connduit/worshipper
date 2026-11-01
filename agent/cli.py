@@ -8,7 +8,7 @@ import sys
 from .helptext import HELP
 
 USAGE = ('usage: python agent_local.py [-h] [--new] [--chat] [--friends] [--list-friends] '
-         '[--debug] [--sync] [--diff] ["your goal"]\nrun with -h for details')
+         '[--debug] [--sync] [--diff] [--promote] [--rollback] [--verify] ["your goal"]\nrun with -h for details')
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,8 +20,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--debug", action="store_true")
     p.add_argument("--sync", action="store_true")
     p.add_argument("--diff", action="store_true")
+    p.add_argument("--promote", action="store_true")
+    p.add_argument("--rollback", action="store_true")
+    p.add_argument("--verify", action="store_true")
     p.add_argument("goal", nargs="*")
     return p
+
+
+def _self_improvement_command(args, cfg) -> int:
+    """--promote / --rollback / --verify: the human's controls over the model's own code changes."""
+    from .config import ROOT
+    from .sandbox import BwrapSandbox
+    from .selfimprove import Promoter, review_and_promote
+
+    if cfg.sandbox_mode != "bwrap":
+        print("These commands need SANDBOX_MODE=bwrap: the new code is tested inside the jail.")
+        return 1
+    sandbox = BwrapSandbox(cfg.workspace)           # no llama bridge needed for the checks
+    promoter = Promoter(ROOT, cfg.dev_dir, lambda command, timeout, binds=(): sandbox.run(command, timeout, False, binds))
+    if args.rollback:
+        restored = promoter.rollback()
+        print("Restored: " + ", ".join(restored) if restored else "Nothing to roll back.")
+        return 0
+    if args.verify:
+        ok, text = promoter.selftest()
+        print(text)
+        return 0 if ok else 1
+    return review_and_promote(promoter, interactive=sys.stdin.isatty())
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -49,6 +74,9 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(str(e))
         sys.stdout.writelines(diff or ["No differences.\n"])
         return
+
+    if args.promote or args.rollback or args.verify:
+        sys.exit(_self_improvement_command(args, cfg))
 
     if args.list_friends:
         from .friends import FriendRegistry
