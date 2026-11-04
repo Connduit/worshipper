@@ -18,13 +18,16 @@
 #
 # Environment overrides:
 #   CTX    context per slot (default depends on the model)
-#   NP     parallel slots, default 1 (the agent and the model's own test runs share the
-#          server, see README_NEW.md). The server gets CTX x NP tokens in total.
+#   NP     parallel slots, default 1: the agent and the model's own test runs then take turns
+#          on the server (NP=2 lets them run side by side, see README_NEW.md). The server gets
+#          CTX x NP tokens in total, so more slots means less context for each.
 #   EXTRA  extra llama-server flags, e.g. EXTRA="-ctk q8_0 -ctv q8_0"
 #   FORCE=1       go ahead even if the checks below fail
 #   SKIP_CHECK=1  don't contact Hugging Face first
 #   DRY_RUN=1     run the checks and print the service file, change nothing
 #   WAIT          seconds to wait for the server (default 3600; big downloads are slow)
+#   STRICT=1      exit with status 4 if the speed check warns (GPU nearly full, or slow). Used by the
+#                 agent's tune_server tool to detect a bad setting and undo it.
 #
 # Gated/private models: put  HF_TOKEN=hf_xxx  in ~/.config/llama-server.env
 # (kept out of the repo on purpose; the service file reads it from there).
@@ -41,7 +44,8 @@ HUB="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 OLD_CACHE="${LLAMA_CACHE:-$HOME/.cache/llama.cpp}"
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
-warn() { echo "WARNING: $*" >&2; }
+PROBLEMS=0
+warn() { echo "WARNING: $*" >&2; PROBLEMS=$((PROBLEMS + 1)); }
 step() { echo; echo "[$1/4] $2"; }
 
 usage() {
@@ -60,12 +64,28 @@ gpu_mib() {   # gpu_mib used|total  ->  MiB, or nothing if there is no GPU tool
 # llama-server answers /v1/models while it is still loading; /health is 200 only when ready.
 server_ready() { curl -sf -m 3 "localhost:$PORT/health" >/dev/null 2>&1; }
 
+uptime_str() {   # how long the llama service has been running, e.g. "2h 14m 05s"; nothing if not running
+  local state ts t0 s
+  state="$(systemctl --user show llama -p ActiveState --value 2>/dev/null || true)"
+  [ "$state" = "active" ] || return 0
+  ts="$(systemctl --user show llama -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+  t0="$(date -d "$ts" +%s 2>/dev/null || true)"
+  [ -n "$t0" ] || return 0
+  s=$(( $(date +%s) - t0 ))
+  if [ "$s" -ge 3600 ]; then printf '%dh %02dm %02ds' $((s / 3600)) $((s % 3600 / 60)) $((s % 60))
+  elif [ "$s" -ge 60 ]; then printf '%dm %02ds' $((s / 60)) $((s % 60))
+  else printf '%ds' "$s"; fi
+}
+
 status() {
+  local up; up="$(uptime_str)"
   systemctl --user status llama --no-pager 2>&1 | head -n 6 || true
   if server_ready; then
-    echo "serving: $(curl -sf "localhost:$PORT/v1/models" | grep -o '"id":"[^"]*"' | head -n 1 | sed 's/"id":"\(.*\)"/\1/' || echo '?') (ready)"
+    echo "serving: $(curl -sf "localhost:$PORT/v1/models" | grep -o '"id":"[^"]*"' | head -n 1 | sed 's/"id":"\(.*\)"/\1/' || echo '?') (ready)${up:+, up for $up}"
+  elif [ -n "$up" ]; then
+    echo "serving: nothing yet. The server process has been running for $up but is not ready (still loading, or stuck)."
   else
-    echo "serving: nothing yet (not running, or still loading)"
+    echo "serving: nothing (the server is not running)"
   fi
 }
 
@@ -302,7 +322,11 @@ t0=$SECONDS; load_t0=$SECONDS
 for ((i = 0; i * 2 < WAIT; i++)); do
   if server_ready; then
     endline; echo; echo "Ready. The model is loaded and serving."; status
+    PROBLEMS=0
     [ -n "${NO_CHECK:-}" ] || speed_check
+    if [ -n "${STRICT:-}" ] && [ "$PROBLEMS" -ne 0 ]; then
+      echo "STRICT: the server is up but not healthy (see the warnings above)."; exit 4
+    fi
     echo
     echo "Tip: start a fresh conversation with the new model:  ./run.sh --new --chat"
     exit 0

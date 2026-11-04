@@ -1,7 +1,11 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from agent.context import compact, total_chars
 from agent.storage import ProjectMemory
 

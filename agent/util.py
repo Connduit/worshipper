@@ -7,10 +7,12 @@ def truncate(s: str, n: int = 3000) -> str:
 
 
 def fmt_duration(seconds: float) -> str:
-    """45 -> '45s', 72 -> '1m 12s', 3725 -> '1h 02m'."""
+    """45 -> '45s', 72 -> '1m 12s', 3725 -> '1h 02m', 183000 -> '2d 02h'."""
     s = int(seconds)
     if s < 60:
         return f"{s}s"
     if s < 3600:
         return f"{s // 60}m {s % 60:02d}s"
-    return f"{s // 3600}h {s % 3600 // 60:02d}m"
+    if s < 86400:
+        return f"{s // 3600}h {s % 3600 // 60:02d}m"
+    return f"{s // 86400}d {s % 86400 // 3600:02d}h"

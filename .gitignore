@@ -4,3 +4,5 @@ session.json
 agent_run.jsonl
 .venv/
 __pycache__/
+session.json.*
+.selfimprove/
