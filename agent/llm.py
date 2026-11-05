@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from urllib import error as _urlerror, request as _urlreq
 
-from .console import Console
+from .console import Console, working
 from .storage import EventLog
 from .util import fmt_duration
 
@@ -58,6 +58,7 @@ class LLM:
         self._errors = (APIStatusError, APIConnectionError)
         self._client = OpenAI(base_url=base_url, api_key=api_key)
         self._resolved: str | None = None
+        self._configured_n_ctx = n_ctx      # set by CONTEXT_TOKENS: the user's word beats the server's
         self._n_ctx = n_ctx                 # context window per request; None = ask the server
         self._props_tried = n_ctx is not None
         self.last_prompt_tokens: int | None = None
@@ -78,6 +79,11 @@ class LLM:
             except Exception:
                 pass
         return self._n_ctx
+
+    def forget_window(self) -> None:
+        """The server was reconfigured (see tune_server): ask it for its window again."""
+        if self._configured_n_ctx is None:
+            self._n_ctx, self._props_tried = None, False
 
     def failure_text(self) -> str:
         """The last failure in plain words, with what to do about it."""
@@ -152,33 +158,17 @@ class LLM:
             time.sleep(poll)
 
     @contextlib.contextmanager
-    def _still_waiting(self, depth: int, label: str = "main", step: int | None = None):
-        """While a request is pending, show a live timer so a slow model looks different from
-        a hung program: an in-place status line on a terminal, or (with --debug and no
-        terminal) a log line every HEARTBEAT seconds."""
-        done = threading.Event()
+    def _still_waiting(self, depth: int, label: str = "main", step: int | None = None, doing: str = ""):
+        """While a request is pending, show a live timer and what the step is for, so a slow model
+        looks different from a hung program."""
         where = label if step is None else f"{label}, step {step}"
-
-        def beat():
-            start = last_line = time.monotonic()
-            while not done.wait(self.TICK):
-                now = time.monotonic()
-                shown = self._console.status(f"{where}: waiting for the model... {fmt_duration(now - start)}")
-                if not shown and now - last_line >= self.HEARTBEAT:
-                    self._console.debug(depth, f"[waiting for the model... {fmt_duration(now - start)}]")
-                    last_line = now
-
-        thread = threading.Thread(target=beat, daemon=True)
-        thread.start()
-        try:
+        text = f"{where}: {doing + ', ' if doing else ''}waiting for the model..."
+        with working(self._console, text, depth, tick=self.TICK, heartbeat=self.HEARTBEAT):
             yield
-        finally:
-            done.set()
-            thread.join(timeout=2)
-            self._console.clear_status()
 
     def chat(self, messages: list, tools: list | None = None, *, depth: int = 0,
-             label: str = "main", step: int | None = None, raise_context_full: bool = False):
+             label: str = "main", step: int | None = None, raise_context_full: bool = False,
+             doing: str = ""):
         """One completion; returns the response, or None if every attempt failed (then
         last_failure / failure_text() say why).
 
@@ -200,7 +190,12 @@ class LLM:
                 kwargs = dict(model=self.model_name, messages=sent, temperature=temperature)
                 if tools:
                     kwargs["tools"] = tools
-                with self._still_waiting(depth, label, step):
+                note = doing
+                if failure is not None:
+                    again = {"bad_tool_call": "a cut-off tool call", "unreachable": "a connection error"}.get(
+                        failure.kind, "a server error")
+                    note = f"retry {attempt}/{total} after {again}" + (f", {doing}" if doing else "")
+                with self._still_waiting(depth, label, step, note):
                     resp = self._client.chat.completions.create(**kwargs)
                 usage = getattr(resp, "usage", None)
                 self.last_prompt_tokens = getattr(usage, "prompt_tokens", None) or self.last_prompt_tokens
