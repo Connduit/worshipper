@@ -412,3 +412,43 @@ are local and may contain sensitive prompts/tool results: protect them like
 session files. Starting a new session deletes the associated memory/archive.
 The archive is not automatically searched; it is available for future retrieval
 features. Tool-call JSON errors are a separate issue from context exhaustion.
+
+## Level 2 reliability work
+
+Install Python dependencies with `python -m pip install -r requirements.txt`.
+Tool arguments are validated against their advertised JSON schemas before dispatch.
+Unexpected properties and incorrect types are rejected. The legacy `finish(summary=...)`
+form remains accepted when it is the only argument. Responses containing multiple
+calls are rejected as a batch, without executing any of them; each call receives an
+error response so conversation history remains valid.
+
+One-shot CLI exit codes: 0 = model reported finish, 2 = step budget exhausted,
+3 = inference failed, 4 = context exhausted. Exit 0 does not yet prove acceptance
+criteria were verified. Durable task state and completion verification remain pending.
+
+The new dashboard is in `dashboard/`; see its README for development commands and
+current demo-mode limitations.
+
+### Download a model without switching
+
+Install the optional downloader dependency once:
+
+```bash
+python3 -m pip install -r requirements-models.txt
+```
+
+Then prefetch weights while the current model keeps serving:
+
+```bash
+./model.sh --download-only qwen-coder
+./model.sh --download-only org/model-GGUF:Q5_K_M
+```
+
+Downloads go to the standard Hugging Face cache (`HF_HOME` is respected), without
+loading weights, rewriting the service, or invoking systemd. Download errors return
+nonzero. Existing local/cached files are reused. Q4_K_M is preferred; single-format
+repositories use their available GGUF format, and ambiguous repositories require an
+explicit quantization. Shards are fetched from the same pinned repository revision.
+`DRY_RUN=1` previews the action. Normal `./model.sh <model>` still switches models.
+Generated service units bind to `0.0.0.0`; set `LLAMA_HOST=127.0.0.1` for loopback-only
+access. Restrict external access to the inference port appropriately.

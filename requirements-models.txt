@@ -1,0 +1,2 @@
+# Optional: download weights without launching llama-server.
+huggingface-hub>=0.34,<2

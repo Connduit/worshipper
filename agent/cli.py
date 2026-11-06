@@ -94,9 +94,12 @@ def main(argv: list[str] | None = None) -> None:
     app.setup(new=args.new, sync=args.sync)
 
     goal = " ".join(args.goal)
+    result = None
     if goal:
-        app.run_goal(goal)
+        result = app.run_goal(goal)
     if args.chat:
         app.chat()
     elif not goal:
         sys.exit(USAGE)
+    elif result is not None and result.exit_code:
+        sys.exit(result.exit_code)

@@ -223,6 +223,7 @@ class Recorder:
 class SlowShell(Tool):
     name = "run_shell"
     description = "pretend shell"
+    parameters = {"type": "object", "properties": {"command": {"type": "string"}}}
     delegating = False
 
     def run(self, args, ctx: CallContext):

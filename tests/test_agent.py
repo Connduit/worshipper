@@ -135,9 +135,9 @@ class AgentFlowTest(TmpCase):
 
         observations = [m["content"] for m in app.messages if m["role"] == "tool"]
         self.assertIn("Looks fine", observations[0])
-        self.assertIn("unknown advisor 'coder'", observations[1])
+        self.assertIn("invalid friend", observations[1])
         self.assertIn("[coder finished]\nwrote f.txt", observations[2])
-        self.assertIn("unknown worker 'nobody'", observations[3])
+        self.assertIn("invalid friend", observations[3])
         coder_msgs = [c for c in llm.calls if c["label"] == "coder"][-1]["messages"]
         self.assertTrue(any("not available to you" in str(m.get("content")) for m in coder_msgs))
         self.assertTrue(os.path.exists(app.cfg.session_file))
@@ -555,6 +555,7 @@ class CliTest(TmpCase):
         for argv, expected in ((["goal"], False), (["--friends", "goal"], True)):
             with mock.patch.dict(os.environ, {**env_for(self.tmp), "USE_FRIENDS": "0"}), \
                     mock.patch("agent.app.App") as app_cls:
+                app_cls.return_value.run_goal.return_value.exit_code = 0
                 cli.main(argv)
             self.assertEqual(app_cls.call_args.args[0].use_friends, expected)
 
@@ -562,6 +563,7 @@ class CliTest(TmpCase):
         for argv, expected in ((["goal"], False), (["--debug", "goal"], True)):
             with mock.patch.dict(os.environ, {**env_for(self.tmp), "DEBUG": "0"}), \
                     mock.patch("agent.app.App") as app_cls:
+                app_cls.return_value.run_goal.return_value.exit_code = 0
                 cli.main(argv)
             self.assertEqual(app_cls.call_args.args[0].debug, expected)
 

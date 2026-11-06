@@ -2,6 +2,8 @@
 # Switch the model served by llama-server (systemd user service).
 #
 #   ./model.sh <model>       switch to <model> (downloads it only if you don't have it)
+#   ./model.sh --download-only <model>  download without switching or restarting
+#                          requires: python3 -m pip install -r requirements-models.txt
 #   ./model.sh status        what is running now
 #   ./model.sh list          aliases and models already downloaded
 #
@@ -22,6 +24,7 @@
 #          on the server (NP=2 lets them run side by side, see README_NEW.md). The server gets
 #          CTX x NP tokens in total, so more slots means less context for each.
 #   EXTRA  extra llama-server flags, e.g. EXTRA="-ctk q8_0 -ctv q8_0"
+#   LLAMA_HOST  bind address when switching (default 0.0.0.0)
 #   FORCE=1       go ahead even if the checks below fail
 #   SKIP_CHECK=1  don't contact Hugging Face first
 #   DRY_RUN=1     run the checks and print the service file, change nothing
@@ -99,6 +102,13 @@ list_models() {
 
 # ---- what did the user ask for? -> SPEC (HF repo[:quant]) or LOCAL (file), DEF_CTX
 SPEC=""; LOCAL=""; DEF_CTX=8192
+DOWNLOAD_ONLY=0
+if [ "${1:-}" = "--download-only" ]; then
+  DOWNLOAD_ONLY=1
+  shift
+  [ "$#" -eq 1 ] || usage
+  case "$1" in status|list) die "--download-only requires a model" ;; esac
+fi
 case "${1:-}" in
   "")          usage ;;
   status)      status; exit 0 ;;
@@ -235,6 +245,18 @@ else
   preflight
 fi
 
+# Downloading never constructs a service file or invokes systemd/llama-server.
+if [ "$DOWNLOAD_ONLY" = 1 ]; then
+  if [ -n "$LOCAL$CACHED" ]; then
+    echo "Already available: ${LOCAL:-$CACHED}"
+  elif [ -n "${DRY_RUN:-}" ]; then
+    echo "Would download $SPEC. The current server would remain unchanged."
+  else
+    HF_TOKEN="$TOKEN" python3 -m agent.model_download "$REPO" "$QUANT"
+  fi
+  exit 0
+fi
+
 # ---- build the service file (a cached model is loaded straight from disk)
 if [ -n "$LOCAL" ]; then MODEL_ARGS="-m \"$LOCAL\""
 elif [ -n "$CACHED" ]; then MODEL_ARGS="-m \"$CACHED\""
@@ -244,7 +266,7 @@ Description=llama-server ($LABEL)
 
 [Service]
 EnvironmentFile=-%h/.config/llama-server.env
-ExecStart=$LLAMA $MODEL_ARGS --jinja -ngl 99 -c $TOTAL -np $NP --host 127.0.0.1 --port $PORT ${EXTRA:-}
+ExecStart=$LLAMA $MODEL_ARGS --jinja -ngl 99 -c $TOTAL -np $NP --host ${LLAMA_HOST:-0.0.0.0} --port $PORT ${EXTRA:-}
 Restart=on-failure
 RestartSec=5
 

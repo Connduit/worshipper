@@ -30,6 +30,11 @@ class RunResult:
     status: str         # FINISHED | MAX_STEPS | LLM_FAILED | CONTEXT_FULL
     text: str = ""      # the finish answer, or the last thing the model said
 
+    @property
+    def exit_code(self) -> int:
+        """Expose incomplete runs to command-line callers."""
+        return {FINISHED: 0, MAX_STEPS: 2, LLM_FAILED: 3, CONTEXT_FULL: 4}.get(self.status, 1)
+
 
 class Agent:
     """Runs one conversation. Used for the main agent (depth 0) and for delegated workers."""
@@ -75,6 +80,16 @@ class Agent:
             # Small local models sometimes forget to call a tool; nudge them.
             if not msg.tool_calls:
                 messages.append({"role": "user", "content": NUDGE})
+                self.on_save()
+                continue
+
+            if len(msg.tool_calls) != 1:
+                observation = "ERROR: call exactly ONE tool per response. No calls in this batch were executed."
+                for call in msg.tool_calls:
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": observation})
+                    self.log.log("tool_rejected", agent=self.name, depth=d, step=step,
+                                 tool=call.function.name, reason="multiple_calls")
+                self.on_save()
                 continue
 
             finished, answer = False, ""
@@ -171,6 +186,9 @@ class Agent:
             observation = "ERROR: tool arguments were not valid JSON. Try again."
         elif tool is None:
             observation = f"ERROR: tool {name} is not available to you. Available: {sorted(self.tools)}"
+        elif (validation_error := tool.validate(
+                {"answer": args["summary"]} if tool.is_final and set(args) == {"summary"} else args)):
+            observation = f"ERROR: {validation_error}. Try again."
         else:
             if tool.is_final:
                 answer = str(args.get("answer") or args.get("summary") or "").strip()   # old name still accepted

@@ -5,6 +5,7 @@ tools; each agent gets a subset of it (see ToolPool.select).
 """
 from __future__ import annotations
 
+import copy
 import os
 import subprocess
 from abc import ABC, abstractmethod
@@ -12,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+
+from jsonschema import Draft202012Validator
 
 from .sandbox import Sandbox
 from .util import truncate
@@ -33,8 +36,23 @@ class Tool(ABC):
     delegating = False          # it starts nested agents; hidden once max depth is reached
 
     def schema(self) -> dict:
+        parameters = copy.deepcopy(self.parameters)
+        parameters.setdefault("additionalProperties", False)
         return {"type": "function", "function": {
-            "name": self.name, "description": self.description, "parameters": self.parameters}}
+            "name": self.name, "description": self.description, "parameters": parameters}}
+
+    def validate(self, args: dict) -> str | None:
+        """Validate before dispatch so malformed calls cannot cause side effects."""
+        schema = self.schema()["function"]["parameters"]
+        Draft202012Validator.check_schema(schema)
+        error = next(Draft202012Validator(schema).iter_errors(args), None)
+        if error is None:
+            return None
+        if error.validator == "required":
+            missing = next(k for k in error.validator_value if k not in error.instance)
+            return f"missing argument {missing!r}"
+        path = ".".join(str(p) for p in error.absolute_path) or "arguments"
+        return f"invalid {path}: {error.message}"
 
     @abstractmethod
     def run(self, args: dict, ctx: CallContext) -> str:
@@ -60,7 +78,8 @@ class RunShellTool(Tool):
                             f"set `timeout` (seconds, max {max_timeout}) for slow commands.")
         self.parameters = {"type": "object",
                            "properties": {"command": {"type": "string"},
-                                          "timeout": {"type": "integer"}},
+                                          "timeout": {"type": "integer", "minimum": 1,
+                                                      "maximum": max_timeout}},
                            "required": ["command"]}
 
     def run(self, args: dict, ctx: CallContext) -> str:
